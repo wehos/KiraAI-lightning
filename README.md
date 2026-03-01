@@ -1,6 +1,8 @@
 <div align="center">
 
-# ✨ KiraAI
+# ✨ KiraAI - Lightning
+
+A more lightweight version of KiraAI
 
 Light up the digital soul
 
