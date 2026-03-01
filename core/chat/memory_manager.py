@@ -6,21 +6,22 @@
 - 海马体：后台事实提取 + 反思生成
 - 遗忘机制：基于重要性和访问频率的记忆衰减
 """
+
 import asyncio
 import ast
 import json
 import os
 import re
 import time
-import uuid
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from threading import Lock
+from asyncio import Lock as AsyncLock
 
 from core.logging_manager import get_logger
 from core.config import KiraConfig
 
 from .session import Session
-from .vector_store import VectorStore, MemoryEntry
+from .tree_store import MarkdownTreeStore, MarkdownMemory
 from .user_profile import UserProfileStore, UserProfile
 
 logger = get_logger("memory_manager", "green")
@@ -31,25 +32,28 @@ CORE_MEMORY_PATH: str = "data/memory/core.txt"
 
 class MemoryManager:
     """双脑架构记忆管理器
-    
+
     快系统（Fast Loop）：对话时检索记忆、维护短期对话历史
     慢系统（Slow Loop）：后台提取事实、生成反思、更新画像、遗忘清理
     """
 
     def __init__(self, kira_config: KiraConfig, llm_client=None):
         self.kira_config = kira_config
-        self.max_memory_length = int(kira_config["bot_config"].get("bot").get("max_memory_length"))
+        self.max_memory_length = int(
+            kira_config["bot_config"].get("bot").get("max_memory_length")
+        )
         self.chat_memory_path = CHAT_MEMORY_PATH
         self.core_memory_path = CORE_MEMORY_PATH
 
-        self.memory_lock = Lock()
+        self.memory_lock = AsyncLock()
 
         # === 短期记忆（原有） ===
         self.chat_memory = self._load_memory(self.chat_memory_path)
+        # `_ensure_memory_format` is synchronous and called in `__init__`, which is fine for startup.
         self._ensure_memory_format()
 
-        # === 长期记忆（向量库） ===
-        self.vector_store = VectorStore()
+        # === 长期记忆（Markdown File Store） ===
+        self.tree_store = MarkdownTreeStore()
 
         # === 用户画像 ===
         self.user_profile_store = UserProfileStore()
@@ -87,6 +91,7 @@ class MemoryManager:
                         return {}
             except Exception as e:
                 import traceback
+
                 err = traceback.format_exc()
                 logger.error(f"Error loading memory from {path}: {e}")
                 logger.error(err)
@@ -105,12 +110,12 @@ class MemoryManager:
                 self.chat_memory[session] = {
                     "title": "",
                     "description": "",
-                    "memory": session_content
+                    "memory": session_content,
                 }
-        self._save_memory(self.chat_memory, self.chat_memory_path)
+        self._sync_save_memory(self.chat_memory, self.chat_memory_path)
 
-    def _save_memory(self, memory: Dict[str, dict] = None, path: str = None):
-        """保存记忆到文件"""
+    def _sync_save_memory(self, memory: Dict[str, dict] = None, path: str = None):
+        """同步保存记忆到文件 (内部使用)"""
         if not memory:
             memory = self.chat_memory
         if not path:
@@ -121,37 +126,43 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"Error saving memory to {path}: {e}")
 
+    async def _save_memory(self, memory: Dict[str, dict] = None, path: str = None):
+        """异步保存记忆到文件"""
+        if not memory:
+            memory = self.chat_memory
+        if not path:
+            path = self.chat_memory_path
+        await asyncio.to_thread(self._sync_save_memory, memory, path)
+
     def get_session_info(self, session: str):
         parts = session.split(":", maxsplit=2)
         if len(parts) != 3:
             raise ValueError("Invalid session ID")
         if session not in self.chat_memory:
-            self.chat_memory[session] = {
-                "title": "",
-                "description": "",
-                "memory": []
-            }
+            self.chat_memory[session] = {"title": "", "description": "", "memory": []}
         return Session(
             adapter_name=parts[0],
             session_type=parts[1],
             session_id=parts[2],
             session_title=self.chat_memory[session]["title"],
-            session_description=self.chat_memory[session]["description"]
+            session_description=self.chat_memory[session]["description"],
         )
 
-    def update_session_info(self, session: str, title: str = None, description: str = None):
-        with self.memory_lock:
+    async def update_session_info(
+        self, session: str, title: str = None, description: str = None
+    ):
+        async with self.memory_lock:
             if session not in self.chat_memory:
                 self.chat_memory[session] = {
                     "title": "",
                     "description": "",
-                    "memory": []
+                    "memory": [],
                 }
             if title:
                 self.chat_memory[session]["title"] = title
             if description:
                 self.chat_memory[session]["description"] = description
-            self._save_memory()
+            await self._save_memory()
 
     def get_memory_count(self, session: str) -> int:
         if session not in self.chat_memory:
@@ -160,11 +171,7 @@ class MemoryManager:
 
     def fetch_memory(self, session: str):
         if session not in self.chat_memory:
-            self.chat_memory[session] = {
-                "title": "",
-                "description": "",
-                "memory": []
-            }
+            self.chat_memory[session] = {"title": "", "description": "", "memory": []}
             return []
         else:
             mem_list = self.chat_memory[session].get("memory", [])
@@ -176,36 +183,34 @@ class MemoryManager:
 
     def read_memory(self, session: str):
         if session not in self.chat_memory:
-            self.chat_memory[session] = {
-                "title": "",
-                "description": "",
-                "memory": []
-            }
+            self.chat_memory[session] = {"title": "", "description": "", "memory": []}
             return []
         else:
             return self.chat_memory[session].get("memory", [])
 
-    def write_memory(self, session: str, memory: list[list[dict]]):
-        with self.memory_lock:
+    async def write_memory(self, session: str, memory: list[list[dict]]):
+        async with self.memory_lock:
             self.chat_memory[session]["memory"] = memory
-            self._save_memory(self.chat_memory, self.chat_memory_path)
+            await self._save_memory(self.chat_memory, self.chat_memory_path)
         logger.info(f"Memory written for {session}")
 
-    def update_memory(self, session: str, new_chunk):
-        with self.memory_lock:
+    async def update_memory(self, session: str, new_chunk):
+        async with self.memory_lock:
             self.chat_memory[session]["memory"].append(new_chunk)
             if len(self.chat_memory[session]["memory"]) > self.max_memory_length:
-                self.chat_memory[session]["memory"] = self.chat_memory[session]["memory"][1:]
-            self._save_memory(self.chat_memory, self.chat_memory_path)
+                self.chat_memory[session]["memory"] = self.chat_memory[session][
+                    "memory"
+                ][1:]
+            await self._save_memory(self.chat_memory, self.chat_memory_path)
         logger.info(f"Memory updated for {session}")
 
         # 将对话加入待处理缓冲区，异步触发海马体
         self._buffer_for_hippocampus(session, new_chunk)
 
-    def delete_session(self, session: str):
-        with self.memory_lock:
+    async def delete_session(self, session: str):
+        async with self.memory_lock:
             self.chat_memory.pop(session)
-            self._save_memory(self.chat_memory, self.chat_memory_path)
+            await self._save_memory(self.chat_memory, self.chat_memory_path)
         logger.info(f"Memory deleted for {session}")
 
     def get_core_memory(self):
@@ -214,7 +219,7 @@ class MemoryManager:
             with open(self.core_memory_path, "w", encoding="utf-8") as f:
                 f.write("")
             return ""
-        with open(self.core_memory_path, "r", encoding='utf-8') as mem:
+        with open(self.core_memory_path, "r", encoding="utf-8") as mem:
             lines = mem.readlines()
         memory_str = ""
         for i, line in enumerate(lines):
@@ -225,9 +230,11 @@ class MemoryManager:
     # 长期记忆（向量检索）
     # ==========================================
 
-    async def recall(self, query: str, user_id: Optional[str] = None, k: int = 5) -> list[MemoryEntry]:
+    async def recall(
+        self, query: str, user_id: Optional[str] = None, k: int = 5
+    ) -> list[MarkdownMemory]:
         """检索与查询相关的长期记忆（快系统 - 对话前调用）
-        
+
         Args:
             query: 当前用户输入
             user_id: 可选的用户ID过滤
@@ -239,31 +246,30 @@ class MemoryManager:
             k = 5
         k = max(1, k)
         try:
-            if not self._llm_client:
-                logger.debug("No LLM client available, skipping recall")
-                return []
-
-            embeddings = await self._llm_client.embed([query])
-            if embeddings and embeddings[0]:
-                return await asyncio.to_thread(
-                    self.vector_store.search,
-                    query_embedding=embeddings[0],
+            # BM25 is purely text-based, no LLM embedding needed
+            if user_id:
+                # Retrieve from tree_store
+                return await self.tree_store.search(
+                    query=query,
                     user_id=user_id,
-                    k=k
+                    folder="facts",
+                    k=k,
+                    update_access=True,
                 )
-            logger.warning("Embedding generation returned empty result, skipping recall")
             return []
         except Exception as e:
             logger.error(f"Recall error: {e}")
             return []
 
-    def format_recalled_memories(self, memories: list[MemoryEntry]) -> str:
+    def format_recalled_memories(self, memories: list[MarkdownMemory]) -> str:
         """将检索到的记忆格式化为 prompt 文本"""
         if not memories:
             return "暂无相关长期记忆"
         parts = []
         for mem in memories:
-            type_label = {"fact": "事实", "reflection": "洞察", "summary": "摘要"}.get(mem.memory_type, mem.memory_type)
+            type_label = {"fact": "事实", "reflection": "洞察", "summary": "摘要"}.get(
+                mem.meta.get("type", "fact"), mem.meta.get("type", "fact")
+            )
             parts.append(f"[{type_label}] {mem.content}")
         return "\n".join(parts)
 
@@ -279,14 +285,18 @@ class MemoryManager:
         """获取用户画像的 prompt 文本"""
         return self.user_profile_store.get_profile_prompt(user_id)
 
-    async def update_user_interaction(self, user_id: str, platform: str = "", nickname: str = ""):
+    async def update_user_interaction(
+        self, user_id: str, platform: str = "", nickname: str = ""
+    ):
         """更新用户交互信息"""
         updates = {}
         if platform:
             updates["platform"] = platform
         if nickname:
             updates["nickname"] = nickname
-        await asyncio.to_thread(self.user_profile_store.increment_and_update_profile, user_id, **updates)
+        await asyncio.to_thread(
+            self.user_profile_store.increment_and_update_profile, user_id, **updates
+        )
 
     # ==========================================
     # 海马体（慢系统 - 后台处理）
@@ -318,7 +328,9 @@ class MemoryManager:
                 # 没有运行中的事件循环，恢复已取出的数据块
                 with self._hippocampus_lock:
                     if session in self._pending_conversations:
-                        self._pending_conversations[session] = chunks_to_process + self._pending_conversations[session]
+                        self._pending_conversations[session] = (
+                            chunks_to_process + self._pending_conversations[session]
+                        )
                     else:
                         self._pending_conversations[session] = chunks_to_process
                 logger.debug("No running event loop, skipping hippocampus processing")
@@ -331,7 +343,10 @@ class MemoryManager:
             return
         exc = task.exception()
         if exc:
-            logger.error("Background hippocampus task failed", exc_info=(type(exc), exc, exc.__traceback__))
+            logger.error(
+                "Background hippocampus task failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     async def _hippocampus_process(self, session: str, chunks: list):
         """海马体后台处理：提取事实 → 去重更新 → 生成反思 → 更新画像"""
@@ -353,12 +368,7 @@ class MemoryManager:
                 await self._deduplicate_and_store(fact, user_id)
 
             # 3. 生成反思（如果积累了足够的事实）
-            user_memories = await asyncio.to_thread(
-                self.vector_store.get_by_user,
-                user_id,
-                "fact",
-                10,
-            )
+            user_memories = await self.tree_store.get_all_memories(user_id, "facts")
             if len(user_memories) >= 5:
                 await self._generate_reflection(user_id, user_memories)
 
@@ -394,13 +404,13 @@ class MemoryManager:
                 start = text.find("[")
                 end = text.rfind("]")
                 if start != -1 and end != -1 and end > start:
-                    text = text[start:end + 1]
+                    text = text[start : end + 1]
                 # 尝试解析 JSON
                 try:
                     facts = json.loads(text)
                 except json.JSONDecodeError:
                     # 移除尾随逗号后重试
-                    text = re.sub(r',\s*([}\]])', r'\1', text)
+                    text = re.sub(r",\s*([}\]])", r"\1", text)
                     try:
                         facts = json.loads(text)
                     except json.JSONDecodeError:
@@ -438,26 +448,10 @@ class MemoryManager:
         if not content:
             return
 
-        # 搜索已有类似记忆（带距离阈值，避免无关记忆触发 LLM 检查）
-        # 只使用外部 embedding 模型搜索，不回退到 ChromaDB 默认文本搜索（避免维度冲突）
-        existing = []
-        initial_embedding = None
-        if self._llm_client:
-            try:
-                embeddings = await self._llm_client.embed([content])
-                if embeddings and embeddings[0]:
-                    initial_embedding = embeddings[0]
-                    existing = await asyncio.to_thread(
-                        self.vector_store.search,
-                        query_embedding=initial_embedding,
-                        user_id=user_id,
-                        memory_type="fact",
-                        k=3,
-                        threshold=0.5,
-                        update_access=False
-                    )
-            except Exception as e:
-                logger.debug(f"Embedding search for dedup failed, skipping dedup: {e}")
+        # 搜索已有类似记忆 (BM25 分数最高的一个)
+        existing = await self.tree_store.search(
+            query=content, user_id=user_id, folder="facts", k=1, update_access=False
+        )
 
         # 检查是否有高度相似的记忆（需要 LLM 判断）
         if existing:
@@ -472,58 +466,37 @@ class MemoryManager:
             elif decision == "update":
                 # 冲突/更新，合并
                 merged = await self._merge_facts(most_similar.content, content)
-                # 为合并后的内容生成新的 embedding，避免维度不匹配
-                merged_embedding = None
-                if self._llm_client:
-                    try:
-                        embs = await self._llm_client.embed([merged])
-                        if embs and embs[0]:
-                            merged_embedding = embs[0]
-                    except Exception:
-                        logger.debug("Failed to generate embedding for merged content")
-                updated = await asyncio.to_thread(
-                    self.vector_store.update_memory,
-                    most_similar.id,
-                    content=merged,
-                    importance=max(importance, most_similar.importance),
-                    embedding=merged_embedding
+
+                most_similar.content = merged
+                most_similar.meta["importance"] = max(
+                    importance, most_similar.meta.get("importance", 5)
                 )
+
+                updated = await self.tree_store.update_memory(most_similar)
                 if updated:
                     logger.info(
                         f"Memory updated (merged): id={most_similar.id}, "
-                        f"type={most_similar.memory_type}, len={len(merged)}, "
-                        f"embedding={'present' if merged_embedding else 'None'}"
+                        f"type={most_similar.meta.get('type')}, len={len(merged)}"
                     )
                 else:
-                    logger.warning(
-                        f"update_memory failed for {most_similar.id} "
-                        f"(embedding={'present' if merged_embedding else 'None'})"
-                    )
+                    logger.warning(f"update_memory failed for {most_similar.id}")
                 return
 
         # 全新事实，添加
-        entry = MemoryEntry(
-            id=VectorStore.generate_id(),
-            user_id=user_id,
-            content=content,
-            memory_type="fact",
-            importance=importance,
-            timestamp=time.time(),
-        )
-
-        # 尝试用 embedding 存储
-        embedding = initial_embedding
-        if embedding is None and self._llm_client:
-            try:
-                embeddings = await self._llm_client.embed([content])
-                if embeddings and embeddings[0]:
-                    embedding = embeddings[0]
-            except Exception:
-                logger.debug("Failed to generate embedding for new memory")
+        meta = {
+            "type": "fact",
+            "importance": importance,
+            "timestamp": time.time(),
+            "access_count": 0,
+        }
 
         try:
-            await asyncio.to_thread(self.vector_store.add_memory, entry, embedding=embedding)
-            logger.info(f"New memory stored: type={entry.memory_type}, id={entry.id}, len={len(content)}, embedding={'present' if embedding else 'None'}")
+            entry = await self.tree_store.add_memory(
+                user_id=user_id, folder="facts", content=content, meta=meta
+            )
+            logger.info(
+                f"New memory stored: type=fact, id={entry.id}, len={len(content)}"
+            )
         except ValueError as e:
             logger.warning(f"Could not store memory (no embedding available): {e}")
 
@@ -568,9 +541,13 @@ class MemoryManager:
             logger.error(f"Merge facts error: {e}")
         return f"{existing}；{new}"
 
-    async def _generate_reflection(self, user_id: str, recent_facts: list[MemoryEntry]):
+    async def _generate_reflection(
+        self, user_id: str, recent_facts: list[MarkdownMemory]
+    ):
         """从累积的事实中生成反思/洞察"""
-        facts_text = "\n".join(f"{i + 1}. {f.content}" for i, f in enumerate(recent_facts))
+        facts_text = "\n".join(
+            f"{i + 1}. {f.content}" for i, f in enumerate(recent_facts)
+        )
 
         prompt = f"""基于以下关于用户的事实，你能推断出什么更高层面的洞察？
 
@@ -582,48 +559,47 @@ class MemoryManager:
         try:
             resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
             if resp and resp.text_response:
-                insights = [line.strip() for line in resp.text_response.strip().split("\n") if line.strip()]
+                insights = [
+                    line.strip()
+                    for line in resp.text_response.strip().split("\n")
+                    if line.strip()
+                ]
                 for insight in insights:
-                    # 生成 embedding（只调用一次，同时用于去重检查和存储）
-                    embedding = None
-                    if self._llm_client:
-                        try:
-                            embs = await self._llm_client.embed([insight])
-                            if embs and embs[0]:
-                                embedding = embs[0]
-                        except Exception:
-                            logger.debug("Failed to generate embedding for reflection")
-
-                    # 检查是否已有高度相似的反思（距离阈值 0.3）
-                    existing = []
-                    if embedding:
-                        existing = await asyncio.to_thread(
-                            self.vector_store.search,
-                            query_embedding=embedding,
-                            user_id=user_id,
-                            memory_type="reflection",
-                            k=1,
-                            threshold=0.3,
-                            update_access=False,
-                        )
+                    # 检查是否已有高度相似的反思 (BM25)
+                    existing = await self.tree_store.search(
+                        query=insight,
+                        user_id=user_id,
+                        folder="reflections",
+                        k=1,
+                        update_access=False,
+                    )
                     if existing:
-                        logger.debug(f"Similar reflection already exists, skipped (len={len(insight)})")
+                        logger.debug(
+                            f"Similar reflection already exists, skipped (len={len(insight)})"
+                        )
                         continue
 
-                    entry = MemoryEntry(
-                        id=VectorStore.generate_id(),
-                        user_id=user_id,
-                        content=insight,
-                        memory_type="reflection",
-                        importance=7,
-                        timestamp=time.time(),
-                    )
+                    meta = {
+                        "type": "reflection",
+                        "importance": 7,
+                        "timestamp": time.time(),
+                        "access_count": 0,
+                    }
 
                     try:
-                        await asyncio.to_thread(self.vector_store.add_memory, entry, embedding=embedding)
-                        logger.info(f"Reflection stored: id={entry.id}, len={len(insight)}, embedding={'present' if embedding else 'None'}")
+                        entry = await self.tree_store.add_memory(
+                            user_id=user_id,
+                            folder="reflections",
+                            content=insight,
+                            meta=meta,
+                        )
+                        logger.info(
+                            f"Reflection stored: id={entry.id}, len={len(insight)}"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to store reflection (id={entry.id}, len={len(insight)}, embedding={'present' if embedding else 'None'}): {e}")
+                        logger.error(
+                            f"Failed to store reflection (id={entry.id}, len={len(insight)}): {e}"
+                        )
                         continue
         except Exception as e:
             logger.error(f"Reflection generation error: {e}")
@@ -634,7 +610,9 @@ class MemoryManager:
             content = fact.get("content", "")
             importance = fact.get("importance", 5)
             if importance >= 7:
-                await asyncio.to_thread(self.user_profile_store.add_fact, user_id, content)
+                await asyncio.to_thread(
+                    self.user_profile_store.add_fact, user_id, content
+                )
 
     # ==========================================
     # 遗忘机制
@@ -645,38 +623,48 @@ class MemoryManager:
         now = time.time()
         removed_count = 0
         removed_ids: set = set()
-        all_memories: list[MemoryEntry] = []
+        all_memories: list[MarkdownMemory] = []
 
-        # 分页获取全部记忆
-        page_size = 1000
-        offset = 0
-        while True:
-            page = await asyncio.to_thread(self.vector_store.get_all_memories, limit=page_size, offset=offset)
-            if not page:
-                break
-            all_memories.extend(page)
-            if len(page) < page_size:
-                break
-            offset += page_size
+        # 在新架构中，我们由于不再是统一的 collection，而是按文件夹存
+        # 遗忘周期应当扫描所有用户的所有 fact 和 reflection
+        try:
+            from .tree_store import ENTITIES_DIR
+
+            if os.path.exists(ENTITIES_DIR):
+                for user_dir in os.listdir(ENTITIES_DIR):
+                    if not user_dir.startswith("user_"):
+                        continue
+                    uid = user_dir[len("user_") :]
+
+                    facts = await self.tree_store.get_all_memories(uid, "facts")
+                    all_memories.extend(facts)
+
+                    refs = await self.tree_store.get_all_memories(uid, "reflections")
+                    all_memories.extend(refs)
+        except Exception as e:
+            logger.error(f"Error scanning directories for forgetting cycle: {e}")
 
         for mem in all_memories:
             score = self._calculate_retention_score(mem, now)
 
             if score < 0.2:
                 # 太低价值，直接删除
-                if await asyncio.to_thread(self.vector_store.delete_memory, mem.id):
+                if await self.tree_store.delete_memory(mem.user_id, mem.folder, mem.id):
                     removed_count += 1
                     removed_ids.add(mem.id)
                 else:
-                    logger.warning(f"Failed to delete memory {mem.id} during forgetting cycle")
-            elif score < 0.4 and mem.memory_type == "fact":
+                    logger.warning(
+                        f"Failed to delete memory {mem.id} during forgetting cycle"
+                    )
+            elif score < 0.4 and mem.meta.get("type") == "fact":
                 # 低价值事实，标记降级
-                if not await asyncio.to_thread(
-                    self.vector_store.update_memory,
-                    mem.id,
-                    importance=max(1, mem.importance - 1)
-                ):
-                    logger.warning(f"Failed to downgrade memory {mem.id} during forgetting cycle")
+                old_imp = mem.meta.get("importance", 5)
+                mem.meta["importance"] = max(1, old_imp - 1)
+
+                if not await self.tree_store.update_memory(mem):
+                    logger.warning(
+                        f"Failed to downgrade memory {mem.id} during forgetting cycle"
+                    )
 
         if removed_count > 0:
             logger.info(f"Forgetting cycle: removed {removed_count} memories")
@@ -686,18 +674,24 @@ class MemoryManager:
         await self._summarize_old_memories(surviving_memories)
 
     @staticmethod
-    def _calculate_retention_score(mem: MemoryEntry, now: float) -> float:
+    def _calculate_retention_score(mem: MarkdownMemory, now: float) -> float:
         """计算记忆保留分数
-        
+
         综合考虑：重要性、时间衰减、访问频率
         分数范围 0.0 ~ 1.0
         """
+        timestamp = mem.meta.get("timestamp", now)
+        last_accessed = mem.meta.get("last_accessed", timestamp)
+        importance = mem.meta.get("importance", 5)
+        access_count = mem.meta.get("access_count", 0)
+        mem_type = mem.meta.get("type", "fact")
+
         # 时间衰减（天数）
-        days_since_creation = (now - mem.timestamp) / 86400 if mem.timestamp else 30
-        days_since_access = (now - mem.last_accessed) / 86400 if mem.last_accessed else 30
+        days_since_creation = (now - timestamp) / 86400 if timestamp else 30
+        days_since_access = (now - last_accessed) / 86400 if last_accessed else 30
 
         # 重要性权重 (0.0 ~ 1.0)
-        importance_score = mem.importance / 10.0
+        importance_score = importance / 10.0
 
         # 时间衰减因子（基于最后访问，半衰期 30 天）
         access_decay = 0.5 ** (days_since_access / 30.0)
@@ -706,39 +700,51 @@ class MemoryManager:
         creation_decay = 0.5 ** (days_since_creation / 90.0)
 
         # 访问频率加成
-        access_bonus = min(mem.access_count * 0.05, 0.3)
+        access_bonus = min(access_count * 0.05, 0.3)
 
         # 反思类型有更高保留权重
-        type_bonus = 0.2 if mem.memory_type == "reflection" else 0.0
+        type_bonus = 0.2 if mem_type == "reflection" else 0.0
 
-        score = (importance_score * 0.35) + (access_decay * 0.25) + (creation_decay * 0.1) + access_bonus + type_bonus
+        score = (
+            (importance_score * 0.35)
+            + (access_decay * 0.25)
+            + (creation_decay * 0.1)
+            + access_bonus
+            + type_bonus
+        )
         return min(score, 1.0)
 
-    async def _summarize_old_memories(self, all_memories: Optional[list[MemoryEntry]] = None):
+    async def _summarize_old_memories(
+        self, all_memories: Optional[list[MarkdownMemory]] = None
+    ):
         """将同一用户的老旧事实合并为摘要"""
         if not self._llm_client:
             return
 
         if all_memories is None:
             all_memories = []
-            page_size = 1000
-            offset = 0
-            while True:
-                page = await asyncio.to_thread(self.vector_store.get_all_memories, limit=page_size, offset=offset)
-                if not page:
-                    break
-                all_memories.extend(page)
-                if len(page) < page_size:
-                    break
-                offset += page_size
+            try:
+                from .tree_store import ENTITIES_DIR
+
+                if os.path.exists(ENTITIES_DIR):
+                    for user_dir in os.listdir(ENTITIES_DIR):
+                        if not user_dir.startswith("user_"):
+                            continue
+                        uid = user_dir[len("user_") :]
+                        facts = await self.tree_store.get_all_memories(uid, "facts")
+                        all_memories.extend(facts)
+            except Exception as e:
+                logger.error(f"Error gathering facts for summarization: {e}")
+
         now = time.time()
 
         # 按用户分组
-        user_old_facts: Dict[str, list[MemoryEntry]] = {}
+        user_old_facts: Dict[str, list[MarkdownMemory]] = {}
         for mem in all_memories:
-            if mem.memory_type != "fact":
+            if mem.meta.get("type", "fact") != "fact":
                 continue
-            days_old = (now - mem.timestamp) / 86400 if mem.timestamp else 0
+            timestamp = mem.meta.get("timestamp", now)
+            days_old = (now - timestamp) / 86400 if timestamp else 0
             if days_old > 30:  # 超过 30 天的事实
                 if mem.user_id not in user_old_facts:
                     user_old_facts[mem.user_id] = []
@@ -757,48 +763,59 @@ class MemoryManager:
 直接输出摘要，每条一行，不要有其他内容。"""
 
             try:
-                resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+                resp = await self._llm_client.chat(
+                    [{"role": "user", "content": prompt}]
+                )
                 if resp and resp.text_response:
-                    summaries = [line.strip() for line in resp.text_response.strip().split("\n") if line.strip()]
+                    summaries = [
+                        line.strip()
+                        for line in resp.text_response.strip().split("\n")
+                        if line.strip()
+                    ]
                     summaries_added = 0
                     for summary in summaries:
-                        entry = MemoryEntry(
-                            id=VectorStore.generate_id(),
-                            user_id=user_id,
-                            content=summary,
-                            memory_type="summary",
-                            importance=6,
-                            timestamp=time.time(),
-                        )
-                        # 为摘要生成 embedding，避免 VectorStore 跳过无嵌入的记忆
-                        summary_embedding = None
-                        if self._llm_client:
-                            try:
-                                embs = await self._llm_client.embed([summary])
-                                if embs and embs[0]:
-                                    summary_embedding = embs[0]
-                            except Exception:
-                                logger.debug("Failed to generate embedding for summary")
+                        meta = {
+                            "type": "summary",
+                            "importance": 6,
+                            "timestamp": time.time(),
+                            "access_count": 0,
+                        }
+
                         try:
-                            await asyncio.to_thread(self.vector_store.add_memory, entry, embedding=summary_embedding)
+                            entry = await self.tree_store.add_memory(
+                                user_id=user_id,
+                                folder="facts",  # summaries still go in facts folder but with type: summary
+                                content=summary,
+                                meta=meta,
+                            )
                             summaries_added += 1
                         except Exception as e:
-                            logger.error(f"Failed to store summary (id={entry.id}): {e}")
+                            logger.error(
+                                f"Failed to store summary (id={entry.id}): {e}"
+                            )
 
                     # 仅在至少一条摘要成功写入后才删除旧事实
                     if summaries_added > 0:
                         deleted_count = 0
                         failed_ids = []
                         for old_fact in old_facts:
-                            if await asyncio.to_thread(self.vector_store.delete_memory, old_fact.id):
+                            if await self.tree_store.delete_memory(
+                                old_fact.user_id, old_fact.folder, old_fact.id
+                            ):
                                 deleted_count += 1
                             else:
                                 failed_ids.append(old_fact.id)
                         if failed_ids:
-                            logger.warning(f"Failed to delete {len(failed_ids)} old facts during summarization for user {user_id}: {failed_ids}")
-                        logger.info(f"Summarized {len(old_facts)} old facts into {summaries_added} summaries for user {user_id} (deleted {deleted_count}/{len(old_facts)})")
+                            logger.warning(
+                                f"Failed to delete {len(failed_ids)} old facts during summarization for user {user_id}: {failed_ids}"
+                            )
+                        logger.info(
+                            f"Summarized {len(old_facts)} old facts into {summaries_added} summaries for user {user_id} (deleted {deleted_count}/{len(old_facts)})"
+                        )
                     else:
-                        logger.warning(f"No summaries stored successfully, keeping {len(old_facts)} old facts for user {user_id}")
+                        logger.warning(
+                            f"No summaries stored successfully, keeping {len(old_facts)} old facts for user {user_id}"
+                        )
             except Exception as e:
                 logger.error(f"Summarization error: {e}")
 
@@ -823,7 +840,7 @@ class MemoryManager:
     @staticmethod
     def _extract_user_id_from_session(session: str) -> str:
         """从 session ID 提取会话标识
-        
+
         session 格式: adapter:type:id
         - 私聊: adapter:pm:user_id → adapter:user_id
         - 群聊: adapter:gm:group_id → adapter:group:group_id

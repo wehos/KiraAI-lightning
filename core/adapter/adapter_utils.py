@@ -1,8 +1,9 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Union, Optional, List, Dict, Any
+from typing import Union, Optional, List, Dict, Any, TYPE_CHECKING
 
-from core.chat.message_utils import KiraMessageEvent, MessageChain
+if TYPE_CHECKING:
+    from core.chat.message_utils import KiraMessageEvent, MessageChain
 
 from core.llm_client import LLMClient
 
@@ -92,12 +93,14 @@ class IMAdapter(ABC):
         """return a client instance"""
         pass
 
-    def publish(self, message: Union[KiraMessageEvent]):
+    def publish(self, message: Union["KiraMessageEvent"]):
         """把消息放到事件总线"""
         asyncio.run_coroutine_threadsafe(self.event_bus.put(message), self.loop)
 
     @abstractmethod
-    async def send_group_message(self, group_id: Union[int, str], send_message_obj: MessageChain) -> Optional[str]:
+    async def send_group_message(
+        self, group_id: Union[int, str], send_message_obj: "MessageChain"
+    ) -> Optional[str]:
         """
         发送群消息
         参数:
@@ -109,7 +112,9 @@ class IMAdapter(ABC):
         pass
 
     @abstractmethod
-    async def send_direct_message(self, user_id: Union[int, str], send_message_obj: MessageChain) -> Optional[str]:
+    async def send_direct_message(
+        self, user_id: Union[int, str], send_message_obj: "MessageChain"
+    ) -> Optional[str]:
         """
         发送私聊消息
         参数:
@@ -145,7 +150,9 @@ class SocialMediaAdapter(ABC):
         pass
 
     @abstractmethod
-    async def send_comment(self, text: str, root: Union[int, str], sub: Union[int, str] = None):
+    async def send_comment(
+        self, text: str, root: Union[int, str], sub: Union[int, str] = None
+    ):
         pass
 
 

@@ -12,6 +12,7 @@ from core.chat import KiraMessageEvent, KiraCommentEvent
 
 class EventType(Enum):
     """事件类型枚举"""
+
     KiraAILoaded = auto()
 
     """When a message arrives, could be KiraMessageEvent, KiraCommentEvent, etc..."""
@@ -39,7 +40,12 @@ class EventType(Enum):
 class EventBus:
     """事件总线"""
 
-    def __init__(self, stats: Statistics, event_queue: asyncio.Queue, message_processor: "MessageProcessor"):
+    def __init__(
+        self,
+        stats: Statistics,
+        event_queue: asyncio.Queue,
+        message_processor: "MessageProcessor",
+    ):
         self.stats = stats
 
         self.event_queue: asyncio.Queue = event_queue
@@ -63,7 +69,7 @@ class EventBus:
             "published": 0,
             "processed": 0,
             "errors": 0,
-            "dropped": 0
+            "dropped": 0,
         }
 
         self.stats.set_stats("event_bus", self.event_bus_stats)
@@ -120,11 +126,7 @@ class EventBus:
         """消费者循环"""
         while self._running_event.is_set():
             try:
-                try:
-                    event = self.event_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    await asyncio.sleep(0.1)
-                    continue
+                event = await self.event_queue.get()
 
                 if event:
                     if isinstance(event, (KiraMessageEvent, KiraCommentEvent)):
@@ -156,7 +158,9 @@ class EventBus:
         self._running_event.set()
 
         while self._running_event.is_set():
-            event: Union[KiraMessageEvent, KiraCommentEvent] = await self.event_queue.get()
+            event: Union[
+                KiraMessageEvent, KiraCommentEvent
+            ] = await self.event_queue.get()
             if isinstance(event, (KiraMessageEvent, KiraCommentEvent)):
                 self.total_messages_stats["total_messages"] += 1
                 self.stats.set_stats("messages", self.total_messages_stats)

@@ -12,7 +12,13 @@ from core.logging_manager import get_logger
 from core.services.runtime import get_adapter_by_name
 from core.utils.common_utils import image_to_base64
 from core.utils.path_utils import get_data_path
-from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent,  KiraCommentEvent, MessageChain, KiraIMSentResult
+from core.chat.message_utils import (
+    KiraMessageEvent,
+    KiraMessageBatchEvent,
+    KiraCommentEvent,
+    MessageChain,
+    KiraIMSentResult,
+)
 from core.prompt_manager import Prompt
 
 from core.chat.message_elements import (
@@ -27,7 +33,7 @@ from core.chat.message_elements import (
     Record,
     Notice,
     Poke,
-    File
+    File,
 )
 
 from core.llm_client import LLMClient
@@ -80,13 +86,15 @@ class SessionBufferManager:
 class MessageProcessor:
     """Core message processor, responsible for handling all message sending and receiving logic"""
 
-    def __init__(self,
-                 kira_config,
-                 llm_api: LLMClient,
-                 provider_manager: ProviderManager,
-                 memory_manager: MemoryManager,
-                 prompt_manager: PromptManager,
-                 max_concurrent_messages: int = 3):
+    def __init__(
+        self,
+        kira_config,
+        llm_api: LLMClient,
+        provider_manager: ProviderManager,
+        memory_manager: MemoryManager,
+        prompt_manager: PromptManager,
+        max_concurrent_messages: int = 3,
+    ):
         self.kira_config = kira_config
         self.bot_config = kira_config["bot_config"].get("bot")
         self.max_message_interval = float(self.bot_config.get("max_message_interval"))
@@ -127,7 +135,9 @@ class MessageProcessor:
         buffer = self.session_buffer.get_buffer(sid)
         return buffer.get_length()
 
-    async def flush_session_messages(self, sid: str, extra_event: KiraMessageEvent | None = None) -> bool:
+    async def flush_session_messages(
+        self, sid: str, extra_event: KiraMessageEvent | None = None
+    ) -> bool:
         buffer = self.session_buffer.get_buffer(sid)
         async with buffer.lock:
             if extra_event is not None:
@@ -141,7 +151,7 @@ class MessageProcessor:
             timestamp=int(time.time()),
             adapter=last_event.adapter,
             session=last_event.session,
-            messages=[m.message for m in pending_messages]
+            messages=[m.message for m in pending_messages],
         )
         await self.handle_im_batch_message(batch_msg)
         return True
@@ -163,12 +173,18 @@ class MessageProcessor:
                 img_desc = await self.llm_api.desc_img(ele.url)
                 message_str += f"[Image {img_desc}]"
             elif isinstance(ele, Sticker):
-                sticker_desc = await self.llm_api.desc_img(ele.sticker_bs64, is_base64=True)
+                sticker_desc = await self.llm_api.desc_img(
+                    ele.sticker_bs64, is_base64=True
+                )
                 message_str += f"[Sticker {sticker_desc}]"
             elif isinstance(ele, Reply):
                 if ele.chain:
-                    ele.chain.message_list = [x for x in ele.chain if not isinstance(x, Reply)]
-                    reply_content = await self.message_format_to_text(ele.chain.message_list)
+                    ele.chain.message_list = [
+                        x for x in ele.chain if not isinstance(x, Reply)
+                    ]
+                    reply_content = await self.message_format_to_text(
+                        ele.chain.message_list
+                    )
                     message_str += f"[Reply {reply_content}]"
                 elif ele.message_content:
                     message_str += f"[Reply {ele.message_content}]"
@@ -178,8 +194,12 @@ class MessageProcessor:
                 if ele.chains:
                     forward_contents = ""
                     for i, chain in enumerate(ele.chains):
-                        ele.chains[i].message_list = [x for x in chain if not isinstance(x, Forward)]
-                        forward_content = await self.message_format_to_text(ele.chains[i].message_list)
+                        ele.chains[i].message_list = [
+                            x for x in chain if not isinstance(x, Forward)
+                        ]
+                        forward_content = await self.message_format_to_text(
+                            ele.chains[i].message_list
+                        )
                         forward_contents += f"\n{forward_content}\n"
                     message_str += f"[Forward {forward_contents.strip()}]"
             elif isinstance(ele, Record):
@@ -202,7 +222,9 @@ class MessageProcessor:
 
         sid = event.session.sid
 
-        event.session.session_description = self.memory_manager.get_session_info(sid).session_description
+        event.session.session_description = self.memory_manager.get_session_info(
+            sid
+        ).session_description
 
         # EventType.ON_IM_MESSAGE
         im_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_IM_MESSAGE)
@@ -219,7 +241,7 @@ class MessageProcessor:
                 timestamp=int(time.time()),
                 adapter=event.adapter,
                 session=event.session,
-                messages=[event.message]
+                messages=[event.message],
             )
             await self.handle_im_batch_message(batch_msg)
             return
@@ -276,7 +298,9 @@ class MessageProcessor:
             message.message_str = message_str
 
         # EventType.ON_IM_BATCH_MESSAGE
-        im_batch_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_IM_BATCH_MESSAGE)
+        im_batch_handlers = event_handler_reg.get_handlers(
+            event_type=EventType.ON_IM_BATCH_MESSAGE
+        )
         for handler in im_batch_handlers:
             await handler.exec_handler(event)
             if event.is_stopped:
@@ -294,11 +318,13 @@ class MessageProcessor:
         chat_env = {
             "platform": event.adapter.platform,
             "adapter": event.adapter.name,
-            "chat_type": 'GroupMessage' if event.is_group_message() else 'DirectMessage',
+            "chat_type": "GroupMessage"
+            if event.is_group_message()
+            else "DirectMessage",
             "self_id": event.self_id,
             "session_title": session_title,
             "session_description": event.session.session_description,
-            "session_list": session_list
+            "session_list": session_list,
         }
 
         # Get chat history memory
@@ -348,9 +374,12 @@ class MessageProcessor:
 
         # Generate agent prompt
         agent_prompt_list = self.prompt_manager.get_agent_prompt(
-            chat_env, core_memory, event.message_types, emoji_dict,
+            chat_env,
+            core_memory,
+            event.message_types,
+            emoji_dict,
             recalled_memories=recalled_memories_str,
-            user_profile=user_profile_str
+            user_profile=user_profile_str,
         )
         # messages = [{"role": "system", "content": agent_prompt}]
 
@@ -362,18 +391,28 @@ class MessageProcessor:
         # New Logic Start
         llm_model = self.provider_mgr.get_default_llm()
         if not llm_model:
-            llm_logger.error(f"Default LLM model not set, please set it in Configuration")
+            llm_logger.error(
+                f"Default LLM model not set, please set it in Configuration"
+            )
             return
 
-        request = LLMRequest(messages=session_memory[:], tools=self.llm_api.tools_definitions, tool_funcs=self.llm_api.tools_functions)
+        request = LLMRequest(
+            messages=session_memory[:],
+            tools=self.llm_api.tools_definitions,
+            tool_funcs=self.llm_api.tools_functions,
+        )
         request.system_prompt.extend(agent_prompt_list)
 
         # Add received im messages
         for i, message in enumerate(event.messages):
-            request.user_prompt.append(Prompt(message.message_str, name="message", source="system"))
+            request.user_prompt.append(
+                Prompt(message.message_str, name="message", source="system")
+            )
 
         # EventType.ON_LLM_REQUEST
-        llm_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_LLM_REQUEST)
+        llm_handlers = event_handler_reg.get_handlers(
+            event_type=EventType.ON_LLM_REQUEST
+        )
         for handler in llm_handlers:
             await handler.exec_handler(event, request)
             if event.is_stopped:
@@ -384,7 +423,9 @@ class MessageProcessor:
         request.assemble_prompt()
 
         # Print user message info
-        user_message = "".join(p.content for p in request.user_prompt if isinstance(p, Prompt))
+        user_message = "".join(
+            p.content for p in request.user_prompt if isinstance(p, Prompt)
+        )
         logger.info(f"processing message(s) from {sid}:\n{user_message}")
 
         # 把收到的消息放到新收到的消息内容中
@@ -414,10 +455,13 @@ class MessageProcessor:
             if llm_resp:
                 llm_logger.debug(llm_resp)
                 llm_logger.info(
-                    f"Time consumed: {llm_resp.time_consumed}s, Input tokens: {llm_resp.input_tokens}, output tokens: {llm_resp.output_tokens}")
+                    f"Time consumed: {llm_resp.time_consumed}s, Input tokens: {llm_resp.input_tokens}, output tokens: {llm_resp.output_tokens}"
+                )
 
                 # EventType.ON_LLM_RESPONSE
-                llm_resp_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_LLM_RESPONSE)
+                llm_resp_handlers = event_handler_reg.get_handlers(
+                    event_type=EventType.ON_LLM_RESPONSE
+                )
                 for handler in llm_resp_handlers:
                     await handler.exec_handler(event, llm_resp)
                     if event.is_stopped:
@@ -427,28 +471,60 @@ class MessageProcessor:
                 if not llm_resp.tool_calls:
                     session_lock = self.get_session_lock(sid)
                     async with session_lock:
-                        message_ids = await self.send_xml_messages(sid, llm_resp.text_response.strip())
-                        response_with_ids = self._add_message_ids(llm_resp.text_response, message_ids)
+                        message_ids = await self.send_xml_messages(
+                            sid, llm_resp.text_response.strip()
+                        )
+                        response_with_ids = self._add_message_ids(
+                            llm_resp.text_response, message_ids
+                        )
                         logger.info(f"LLM: {response_with_ids}")
-                    request.messages.append({"role": "assistant",
-                                            "content": response_with_ids if llm_resp.text_response else ""})
-                    append_msg({"role": "assistant",
-                                "content": response_with_ids if llm_resp.text_response else ""})
+                    request.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response_with_ids
+                            if llm_resp.text_response
+                            else "",
+                        }
+                    )
+                    append_msg(
+                        {
+                            "role": "assistant",
+                            "content": response_with_ids
+                            if llm_resp.text_response
+                            else "",
+                        }
+                    )
                     break
                 else:
                     if llm_resp.text_response:
                         session_lock = self.get_session_lock(sid)
                         async with session_lock:
-                            message_ids = await self.send_xml_messages(sid, llm_resp.text_response.strip())
-                            response_with_ids = self._add_message_ids(llm_resp.text_response, message_ids)
+                            message_ids = await self.send_xml_messages(
+                                sid, llm_resp.text_response.strip()
+                            )
+                            response_with_ids = self._add_message_ids(
+                                llm_resp.text_response, message_ids
+                            )
                             logger.info(f"LLM: {response_with_ids}")
                     await self.llm_api.execute_tool(event, llm_resp)
-                    request.messages.append({"role": "assistant",
-                                             "content": response_with_ids if llm_resp.text_response else "",
-                                             "tool_calls": llm_resp.tool_calls})
-                    append_msg({"role": "assistant",
-                                "content": response_with_ids if llm_resp.text_response else "",
-                                "tool_calls": llm_resp.tool_calls})
+                    request.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response_with_ids
+                            if llm_resp.text_response
+                            else "",
+                            "tool_calls": llm_resp.tool_calls,
+                        }
+                    )
+                    append_msg(
+                        {
+                            "role": "assistant",
+                            "content": response_with_ids
+                            if llm_resp.text_response
+                            else "",
+                            "tool_calls": llm_resp.tool_calls,
+                        }
+                    )
                     request.messages.extend(llm_resp.tool_results)
                     extend_msg(llm_resp.tool_results)
             else:
@@ -456,20 +532,26 @@ class MessageProcessor:
                 append_msg({"role": "assistant", "content": ""})
                 break
 
-        self.memory_manager.update_memory(sid, new_memory_chunk)
+        await self.memory_manager.update_memory(sid, new_memory_chunk)
         if not self.memory_manager.get_session_info(sid).session_title:
-            self.memory_manager.update_session_info(sid, event.session.session_title)
+            await self.memory_manager.update_session_info(
+                sid, event.session.session_title
+            )
 
     async def handle_cmt_message(self, msg: KiraCommentEvent):
         """process comment message"""
 
         if msg.sub_cmt_id:
-            logger.info(f"[{msg.adapter_name} | {msg.sub_cmt_id}] [{msg.commenter_nickname}]: {msg.sub_cmt_content[0].text}")
+            logger.info(
+                f"[{msg.adapter_name} | {msg.sub_cmt_id}] [{msg.commenter_nickname}]: {msg.sub_cmt_content[0].text}"
+            )
             cmt_content = f"""You: {msg.cmt_content[0].text}
             {msg.commenter_nickname}: {msg.sub_cmt_content[0].text}
             """
         else:
-            logger.info(f"[{msg.adapter_name} | {msg.cmt_id}] [{msg.commenter_nickname}]: {msg.cmt_content[0].text}")
+            logger.info(
+                f"[{msg.adapter_name} | {msg.cmt_id}] [{msg.commenter_nickname}]: {msg.cmt_content[0].text}"
+            )
             cmt_content = f"""{msg.commenter_nickname}: {msg.cmt_content[0].text}"""
 
         cmt_prompt = self.prompt_manager.get_comment_prompt(cmt_content)
@@ -482,9 +564,7 @@ class MessageProcessor:
 
         if response:
             await get_adapter_by_name(msg.adapter_name).send_comment(
-                text=response,
-                root=msg.cmt_id,
-                sub=msg.sub_cmt_id
+                text=response, root=msg.cmt_id, sub=msg.sub_cmt_id
             )
         else:
             logger.warning("Blank LLM response")
@@ -498,7 +578,9 @@ class MessageProcessor:
         """
         parts = target.split(":")
         if len(parts) != 3:
-            raise ValueError("invalid target, must follow the form of <adapter>:<dm|gm>:<id>")
+            raise ValueError(
+                "invalid target, must follow the form of <adapter>:<dm|gm>:<id>"
+            )
         adapter_name, chat_type, pid = parts[0], parts[1], parts[2]
 
         message_ids = []
@@ -515,16 +597,22 @@ class MessageProcessor:
                 result = await self.send_message_chain(target, message_obj)
                 if not result.ok and result.err:
                     logger.error(result.err)
-                message_ids.append(result.message_id if result.message_id is not None else "")
+                message_ids.append(
+                    result.message_id if result.message_id is not None else ""
+                )
 
                 # add random message delay
-                await asyncio.sleep(random.uniform(self.min_message_delay, self.max_message_delay))
+                await asyncio.sleep(
+                    random.uniform(self.min_message_delay, self.max_message_delay)
+                )
             else:
                 message_ids.append("")
 
         return message_ids
 
-    async def send_message_chain(self, session: str, chain: MessageChain) -> KiraIMSentResult:
+    async def send_message_chain(
+        self, session: str, chain: MessageChain
+    ) -> KiraIMSentResult:
         """
         Send a MessageChain to target.
 
@@ -571,8 +659,12 @@ class MessageProcessor:
                 elif tag == "sticker":
                     sticker_id = value
                     try:
-                        sticker_path = self.prompt_manager.sticker_dict[sticker_id].get("path")
-                        sticker_bs64 = await image_to_base64(f"{get_data_path()}/sticker/{sticker_path}")
+                        sticker_path = self.prompt_manager.sticker_dict[sticker_id].get(
+                            "path"
+                        )
+                        sticker_bs64 = await image_to_base64(
+                            f"{get_data_path()}/sticker/{sticker_path}"
+                        )
                         message_elements.append(Sticker(sticker_id, sticker_bs64))
                     except Exception as e:
                         logger.error(f"error while parsing sticker: {str(e)}")
@@ -594,17 +686,27 @@ class MessageProcessor:
                         record_bs64 = await self.llm_api.text_to_speech(value)
                         message_elements.append(Record(record_bs64))
                     except Exception as e:
-                        logger.error(f"an error occurred while generating voice message: {e}")
+                        logger.error(
+                            f"an error occurred while generating voice message: {e}"
+                        )
                         message_elements.append(Text(f"<record>{value}</record>"))
                 elif tag == "poke":
                     message_elements.append(Poke(value))
                 elif tag == "selfie":
                     try:
-                        ref_img_path = self.kira_config.get('bot_config', {}).get('selfie', {}).get('path', '')
+                        ref_img_path = (
+                            self.kira_config.get("bot_config", {})
+                            .get("selfie", {})
+                            .get("path", "")
+                        )
                         if os.path.exists(f"{get_data_path()}/{ref_img_path}"):
                             img_extension = ref_img_path.split(".")[-1]
-                            bs64 = await image_to_base64(f"{get_data_path()}/{ref_img_path}")
-                            img_res = await self.llm_api.image_to_image(value, bs64=f"data:image/{img_extension};base64,{bs64}")
+                            bs64 = await image_to_base64(
+                                f"{get_data_path()}/{ref_img_path}"
+                            )
+                            img_res = await self.llm_api.image_to_image(
+                                value, bs64=f"data:image/{img_extension};base64,{bs64}"
+                            )
                             if img_res:
                                 if img_res.url:
                                     message_elements.append(Image(url=img_res.url))
@@ -613,7 +715,9 @@ class MessageProcessor:
                                 else:
                                     logger.warning("Invalid selfie image result")
                         else:
-                            logger.warning(f"Selfie reference image not found, skipped generation")
+                            logger.warning(
+                                f"Selfie reference image not found, skipped generation"
+                            )
                     except Exception as e:
                         logger.error(f"Failed to generate selfie: {e}")
                 elif tag == "file":
@@ -647,7 +751,7 @@ class MessageProcessor:
                 if i < len(message_ids):
                     msg.set("message_id", message_ids[i])
 
-            return ET.tostring(root, encoding='unicode', method='xml')[6:-7]
+            return ET.tostring(root, encoding="unicode", method="xml")[6:-7]
 
         except Exception as e:
             logger.error(f"Error adding message IDs: {str(e)}")

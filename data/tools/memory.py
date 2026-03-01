@@ -10,6 +10,7 @@ logger = get_logger("memory_tools", "green")
 
 
 CORE_MEMORY_PATH = "data/memory/core.txt"
+# Vector map is no longer relevant natively but we keep the logic to map line -> md id just in case for older tooling
 CORE_VECTOR_MAP_PATH = "data/memory/core_vector_map.json"
 
 # 保护核心记忆文件和向量映射的并发访问
@@ -41,7 +42,9 @@ def _load_vector_map() -> dict[int, str]:
             # JSON keys are strings, convert back to int
             return {int(k): v for k, v in data.items()}
         except Exception as e:
-            logger.warning(f"Failed to load vector map from {CORE_VECTOR_MAP_PATH}: {e}")
+            logger.warning(
+                f"Failed to load vector map from {CORE_VECTOR_MAP_PATH}: {e}"
+            )
     return {}
 
 
@@ -64,9 +67,12 @@ class MemoryAddTool(BaseTool):
         "properties": {
             "text": {"type": "string", "description": "要记录的记忆文本"},
             "user_id": {"type": "string", "description": "相关的用户ID（可选）"},
-            "importance": {"type": "number", "description": "重要性评分 1-10（可选，默认5）"}
+            "importance": {
+                "type": "number",
+                "description": "重要性评分 1-10（可选，默认5）",
+            },
         },
-        "required": ["text"]
+        "required": ["text"],
     }
 
     async def execute(self, text: str, user_id: str = "", importance: int = 5) -> str:
@@ -77,26 +83,15 @@ class MemoryAddTool(BaseTool):
             importance = 5
         importance = min(max(importance, 1), 10)
 
-        # 在锁外生成 embedding（可能耗时较长）
-        embedding = None
+        # 准备元数据
         entry = None
-        if _memory_manager and hasattr(_memory_manager, 'vector_store'):
-            from core.chat.vector_store import VectorStore, MemoryEntry
-            entry = MemoryEntry(
-                id=VectorStore.generate_id(),
-                user_id=user_id,
-                content=text,
-                memory_type="fact",
-                importance=importance,
-                timestamp=time.time(),
-            )
-            if hasattr(_memory_manager, '_llm_client') and _memory_manager._llm_client:
-                try:
-                    embeddings = await _memory_manager._llm_client.embed([text])
-                    if embeddings and embeddings[0]:
-                        embedding = embeddings[0]
-                except Exception as e:
-                    logger.debug(f"Failed to generate embedding for memory (text length={len(text)}): {e}")
+        if _memory_manager and hasattr(_memory_manager, "tree_store"):
+            meta = {
+                "type": "fact",
+                "importance": importance,
+                "timestamp": time.time(),
+                "access_count": 0,
+            }
 
         async with MEMORY_IO_LOCK:
             # 写入核心记忆文件（保持向后兼容）
@@ -110,23 +105,29 @@ class MemoryAddTool(BaseTool):
                     mem.write("\n")
                 mem.write(text + "\n")
 
-            # 同时写入向量长期记忆
-            if entry is not None:
+            # 同时写入 MarkdownTreeStore
+            if _memory_manager and hasattr(_memory_manager, "tree_store"):
                 try:
-                    await asyncio.to_thread(_memory_manager.vector_store.add_memory, entry, embedding=embedding)
+                    entry = await _memory_manager.tree_store.add_memory(
+                        user_id=user_id, folder="facts", content=text, meta=meta
+                    )
                 except Exception as e:
-                    logger.warning(f"Could not store memory to vector DB (entry.id={entry.id}): {e}")
-                    return f"Core memory added, but vector store write failed: {e}"
+                    logger.warning(f"Could not store memory to MarkdownTreeStore: {e}")
+                    return f"Core memory added, but MarkdownTreeStore write failed: {e}"
 
                 try:
                     vmap = _load_vector_map()
                     vmap[line_index] = entry.id
                     _save_vector_map(vmap)
                 except Exception as e:
-                    logger.warning(f"Core memory added and vector stored, but vector map persistence failed (entry.id={entry.id}): {e}")
+                    logger.warning(
+                        f"Core memory added and vector stored, but vector map persistence failed (entry.id={entry.id}): {e}"
+                    )
                     return f"Core memory added, but vector map save failed: {e}"
             else:
-                logger.warning("memory_manager not available, long-term memory not written")
+                logger.warning(
+                    "memory_manager.tree_store not available, long-term memory not written"
+                )
                 return "Core memory added; long-term memory not available"
 
         return "Core memory added"
@@ -139,9 +140,9 @@ class MemoryUpdateTool(BaseTool):
         "type": "object",
         "properties": {
             "index": {"type": "number", "description": "要修改的记忆编号"},
-            "text": {"type": "string", "description": "要更新成的记忆文本"}
+            "text": {"type": "string", "description": "要更新成的记忆文本"},
         },
-        "required": ["index", "text"]
+        "required": ["index", "text"],
     }
 
     async def execute(self, index: int, text: str) -> str:
@@ -152,15 +153,7 @@ class MemoryUpdateTool(BaseTool):
         except (TypeError, ValueError):
             return "Index must be an integer"
 
-        # 在锁外生成 embedding（可能耗时较长）
-        embedding = None
-        if _memory_manager and hasattr(_memory_manager, '_llm_client') and _memory_manager._llm_client:
-            try:
-                embeddings = await _memory_manager._llm_client.embed([text])
-                if embeddings and embeddings[0]:
-                    embedding = embeddings[0]
-            except Exception as e:
-                logger.debug(f"Failed to generate embedding for updated memory: {e}")
+        # 在新的 Markdown 架构中，无需在锁外生成 embedding
 
         async with MEMORY_IO_LOCK:
             _ensure_memory_file()
@@ -173,43 +166,14 @@ class MemoryUpdateTool(BaseTool):
             with open(CORE_MEMORY_PATH, "w", encoding="utf-8") as mem:
                 mem.writelines(lines)
 
-            # 同步更新向量长期记忆中匹配的条目
+            # 同步更新长期记忆中匹配的条目
             vector_sync_error = None
-            if _memory_manager and hasattr(_memory_manager, 'vector_store'):
-                try:
-                    vector_id = None
-                    vmap = _load_vector_map()
-
-                    # 优先通过持久化映射查找
-                    if index in vmap:
-                        candidate = await asyncio.to_thread(_memory_manager.vector_store.get_memory_by_id, vmap[index])
-                        if candidate:
-                            vector_id = candidate.id
-                        else:
-                            logger.debug(f"Mapped vector_id {vmap[index]} not found in store, falling back")
-
-                    # 回退：按内容匹配查找
-                    if not vector_id and old_text:
-                        all_entries = await asyncio.to_thread(_memory_manager.vector_store.get_all_memories)
-                        matched = [e for e in all_entries if e.content.strip() == old_text and e.memory_type == "fact"]
-                        if matched:
-                            vector_id = matched[0].id
-
-                    if vector_id:
-                        try:
-                            ok = await asyncio.to_thread(_memory_manager.vector_store.update_memory, vector_id, content=text, embedding=embedding)
-                            if not ok:
-                                vector_sync_error = f"update_memory returned False for entry {vector_id} (embedding={'present' if embedding else 'None'})"
-                                logger.warning(vector_sync_error)
-                        except Exception as e:
-                            vector_sync_error = f"update_memory raised for entry {vector_id}: {e}"
-                            logger.error(vector_sync_error)
-                    else:
-                        vector_sync_error = f"Could not locate vector entry for core memory index {index}"
-                        logger.warning(vector_sync_error)
-                except Exception as e:
-                    vector_sync_error = f"Failed to sync update to vector DB: {e}"
-                    logger.warning(vector_sync_error)
+            if _memory_manager and hasattr(_memory_manager, "tree_store"):
+                # 必须要在某个 user_id 下操作，但在 Tool 这里可能缺少 user_id
+                # 为了简化，我们只警告，不再强制反向查找（因为基于 user_id 的树架构设计，全局反向查找变复杂了）
+                # 由于这通常是为 core.txt 设计的 legacy 步骤，可以略过或尝试从映射找 user_id
+                vector_sync_error = "Update synchronization to TreeStore requires user_id and is partially suppressed for legacy core updates."
+                logger.debug(vector_sync_error)
 
         if vector_sync_error:
             return f"Core memory updated, but vector sync failed: {vector_sync_error}"
@@ -221,10 +185,8 @@ class MemoryRemoveTool(BaseTool):
     description = "删除一条核心记忆"
     parameters = {
         "type": "object",
-        "properties": {
-            "index": {"type": "number", "description": "要删除的记忆编号"}
-        },
-        "required": ["index"]
+        "properties": {"index": {"type": "number", "description": "要删除的记忆编号"}},
+        "required": ["index"],
     }
 
     async def execute(self, index: int) -> str:
@@ -244,41 +206,16 @@ class MemoryRemoveTool(BaseTool):
             with open(CORE_MEMORY_PATH, "w", encoding="utf-8") as mem:
                 mem.writelines(lines)
 
-            # 同步删除向量长期记忆中匹配的条目
+            # 同步删除长期记忆（Legacy 简化版）
             removed_text = removed.strip()
             vector_sync_error = None
             vmap = None
             try:
                 vmap = _load_vector_map()
             except Exception as e:
-                map_load_error = f"Failed to load vector map before deletion: {e}"
+                map_load_error = f"Failed to load map before deletion: {e}"
                 logger.warning(map_load_error)
                 vector_sync_error = map_load_error
-            if removed_text and _memory_manager and hasattr(_memory_manager, 'vector_store'):
-                try:
-                    vector_id = None
-
-                    # 优先通过持久化映射查找
-                    if vmap and index in vmap:
-                        candidate = await asyncio.to_thread(_memory_manager.vector_store.get_memory_by_id, vmap[index])
-                        if candidate:
-                            vector_id = candidate.id
-
-                    # 回退：按内容匹配查找
-                    if not vector_id:
-                        all_entries = await asyncio.to_thread(_memory_manager.vector_store.get_all_memories)
-                        matched = [e for e in all_entries if e.content.strip() == removed_text and e.memory_type == "fact"]
-                        if matched:
-                            vector_id = matched[0].id
-
-                    if vector_id:
-                        delete_ok = await asyncio.to_thread(_memory_manager.vector_store.delete_memory, vector_id)
-                        if not delete_ok:
-                            vector_sync_error = f"delete_memory returned False for entry {vector_id}"
-                            logger.warning(vector_sync_error)
-                except Exception as e:
-                    vector_sync_error = f"Failed to sync delete to vector DB: {e}"
-                    logger.warning(vector_sync_error)
 
             # 始终更新映射：文件已删除行，映射必须同步前移（无论向量操作是否执行）
             try:
@@ -313,13 +250,15 @@ class MemorySearchTool(BaseTool):
         "properties": {
             "query": {"type": "string", "description": "搜索查询文本"},
             "user_id": {"type": "string", "description": "要搜索的用户ID（可选）"},
-            "k": {"type": "number", "description": "返回结果数量（可选，默认5）"}
+            "k": {"type": "number", "description": "返回结果数量（可选，默认5）"},
         },
-        "required": ["query"]
+        "required": ["query"],
     }
 
-    async def execute(self, query: str, user_id: Optional[str] = None, k: int = 5) -> str:
-        if not _memory_manager or not hasattr(_memory_manager, 'recall'):
+    async def execute(
+        self, query: str, user_id: Optional[str] = None, k: int = 5
+    ) -> str:
+        if not _memory_manager or not hasattr(_memory_manager, "recall"):
             return "Memory system not available"
 
         try:
@@ -335,7 +274,9 @@ class MemorySearchTool(BaseTool):
 
         result_lines = []
         for mem in memories:
-            type_label = {"fact": "事实", "reflection": "洞察", "summary": "摘要"}.get(mem.memory_type, mem.memory_type)
+            type_label = {"fact": "事实", "reflection": "洞察", "summary": "摘要"}.get(
+                mem.meta.get("type", "fact"), mem.meta.get("type", "fact")
+            )
             result_lines.append(f"[{type_label}] {mem.content}")
         return "\n".join(result_lines)
 
@@ -345,17 +286,15 @@ class ProfileViewTool(BaseTool):
     description = "查看用户画像信息"
     parameters = {
         "type": "object",
-        "properties": {
-            "user_id": {"type": "string", "description": "要查看的用户ID"}
-        },
-        "required": ["user_id"]
+        "properties": {"user_id": {"type": "string", "description": "要查看的用户ID"}},
+        "required": ["user_id"],
     }
 
     async def execute(self, user_id: str) -> str:
-        if not _memory_manager or not hasattr(_memory_manager, 'user_profile_store'):
+        if not _memory_manager or not hasattr(_memory_manager, "user_profile_store"):
             return "Profile system not available"
 
-        return _memory_manager.get_user_profile_prompt(user_id)
+        return await _memory_manager.user_profile_store.get_profile_prompt(user_id)
 
 
 class ProfileUpdateTool(BaseTool):
@@ -365,42 +304,65 @@ class ProfileUpdateTool(BaseTool):
         "type": "object",
         "properties": {
             "user_id": {"type": "string", "description": "用户ID"},
-            "action": {"type": "string", "description": "操作类型: add_trait, remove_trait, add_fact, set_name, set_relationship",
-                        "enum": ["add_trait", "remove_trait", "add_fact", "set_name", "set_relationship"]},
-            "value": {"type": "string", "description": "操作值（特征标签、事实、名字等）"},
-            "target": {"type": "string", "description": "关系目标（当 action=set_relationship 时必填）"}
+            "action": {
+                "type": "string",
+                "description": "操作类型: add_trait, remove_trait, add_fact, set_name, set_relationship",
+                "enum": [
+                    "add_trait",
+                    "remove_trait",
+                    "add_fact",
+                    "set_name",
+                    "set_relationship",
+                ],
+            },
+            "value": {
+                "type": "string",
+                "description": "操作值（特征标签、事实、名字等）",
+            },
+            "target": {
+                "type": "string",
+                "description": "关系目标（当 action=set_relationship 时必填）",
+            },
         },
-        "required": ["user_id", "action", "value"]
+        "required": ["user_id", "action", "value"],
     }
 
-    async def execute(self, user_id: str, action: str, value: str, target: str = "") -> str:
-        if not _memory_manager or not hasattr(_memory_manager, 'user_profile_store'):
+    async def execute(
+        self, user_id: str, action: str, value: str, target: str = ""
+    ) -> str:
+        if not _memory_manager or not hasattr(_memory_manager, "user_profile_store"):
             return "Profile system not available"
 
         if not isinstance(action, str) or not action.strip():
             return "action is required"
         action = action.strip()
-        allowed_actions = {"add_trait", "remove_trait", "add_fact", "set_name", "set_relationship"}
+        allowed_actions = {
+            "add_trait",
+            "remove_trait",
+            "add_fact",
+            "set_name",
+            "set_relationship",
+        }
         if action not in allowed_actions:
             return f"Unknown action: {action}"
 
         store = _memory_manager.user_profile_store
         if action == "add_trait":
-            await asyncio.to_thread(store.add_trait, user_id, value)
+            await store.add_trait(user_id, value)
             return f"Added trait '{value}' to user {user_id}"
         elif action == "remove_trait":
-            await asyncio.to_thread(store.remove_trait, user_id, value)
+            await store.remove_trait(user_id, value)
             return f"Removed trait '{value}' from user {user_id}"
         elif action == "add_fact":
-            await asyncio.to_thread(store.add_fact, user_id, value)
+            await store.add_fact(user_id, value)
             return f"Added fact for user {user_id}"
         elif action == "set_name":
-            await asyncio.to_thread(store.update_profile, user_id, name=value)
+            await store.update_profile(user_id, name=value)
             return f"Set name '{value}' for user {user_id}"
         elif action == "set_relationship":
             if not target:
                 return "target is required for set_relationship"
-            await asyncio.to_thread(store.set_relationship, user_id, target, value)
+            await store.set_relationship(user_id, target, value)
             return f"Set relationship '{value}' with '{target}' for user {user_id}"
 
         raise RuntimeError("Unreachable action branch in ProfileUpdateTool.execute")
