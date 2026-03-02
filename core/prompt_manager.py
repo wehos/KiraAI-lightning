@@ -237,13 +237,13 @@ class PromptManager:
                 source="system",
                 chat_env=chat_env,
             ),
-            Prompt(prompt_tmpl.persona_tmpl, name="persona", source="system"),
             Prompt(
                 prompt_tmpl.persona_tmpl,
-                name="attention",
+                name="persona",
                 source="system",
                 persona=persona_prompt,
             ),
+            Prompt(prompt_tmpl.attention_tmpl, name="attention", source="system"),
             Prompt(
                 prompt_tmpl.time_tmpl,
                 name="time",
