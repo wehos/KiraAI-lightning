@@ -17,6 +17,8 @@ from .persona import PersonaManager
 from .provider import ProviderManager
 from core.agent.mcp_mgr import MCPManager
 from core.chat.persona_evolution import PersonaEvolutionEngine
+from core.plugin import PluginManager
+from core.plugin.plugin_context import PluginContext
 
 
 logger = get_logger("lifecycle", "blue")
@@ -40,6 +42,7 @@ class KiraLifecycle:
         self.event_bus: Optional[EventBus] = None
         self.mcp_manager: Optional[MCPManager] = None
         self.persona_evolution: Optional[PersonaEvolutionEngine] = None
+        self.plugin_manager: Optional[PluginManager] = None
         self.tasks: list[asyncio.Task] = []
 
     async def schedule_tasks(self):
@@ -153,6 +156,25 @@ class KiraLifecycle:
         self.event_bus = EventBus(
             self.stats, event_queue, self.message_processor
         )
+
+        # ====== init Plugin manager ======
+        try:
+            plugin_ctx = PluginContext(
+                config=self.kira_config,
+                event_bus=self.event_bus,
+                provider_mgr=self.provider_manager,
+                llm_api=self.llm_api,
+                adapter_mgr=self.adapter_manager,
+                persona_mgr=self.persona_manager,
+                memory_mgr=self.memory_manager,
+                message_processor=self.message_processor,
+            )
+            self.plugin_manager = PluginManager(ctx=plugin_ctx)
+            plugin_ctx.plugin_mgr = self.plugin_manager
+            await self.plugin_manager.init()
+            logger.info("PluginManager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize PluginManager: {e}", exc_info=True)
 
         # ====== init MCP manager ======
         try:
