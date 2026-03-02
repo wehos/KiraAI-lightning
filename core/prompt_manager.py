@@ -224,7 +224,12 @@ class PromptManager:
         persona_prompt = self.persona_manager.get_persona()
 
         agent_prompt: list[Prompt] = [
+            # ===== 固定内容（利于 prefix caching） =====
             Prompt(prompt_tmpl.role_tmpl, name="role", source="system"),
+            Prompt(prompt_tmpl.attention_tmpl, name="attention", source="system"),
+            Prompt(prompt_tmpl.format_header_tmpl, name="format_header", source="system"),
+            Prompt(prompt_tmpl.tools_tmpl, name="tools", source="system"),
+            # ===== 动态内容（每次请求变化） =====
             Prompt(
                 prompt_tmpl.accounts_tmpl,
                 name="accounts",
@@ -243,7 +248,6 @@ class PromptManager:
                 source="system",
                 persona=persona_prompt,
             ),
-            Prompt(prompt_tmpl.attention_tmpl, name="attention", source="system"),
             Prompt(
                 prompt_tmpl.time_tmpl,
                 name="time",
@@ -264,17 +268,11 @@ class PromptManager:
                 recalled_memories=recalled_memories,
                 user_profile=user_profile,
             ),
-            Prompt(prompt_tmpl.tools_tmpl, name="tools", source="system"),
             Prompt(
                 prompt_tmpl.output_tmpl,
                 name="output",
                 source="system",
                 max_tool_loop=max_tool_loop,
-            ),
-            Prompt(
-                prompt_tmpl.format_tmpl,
-                name="format",
-                source="system",
                 format=format_prompt,
             ),
         ]
