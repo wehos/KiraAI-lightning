@@ -1,0 +1,67 @@
+{
+  "provider_config": {
+    "base_url": {
+      "name": "Base URL",
+      "type": "string",
+      "default": "",
+      "hint": "自定义 API 地址（留空使用官方 generativelanguage.googleapis.com，国内可填代理地址如 https://your-proxy.com/v1beta）"
+    },
+    "api_key": {
+      "name": "API Key",
+      "type": "sensitive",
+      "default": null,
+      "hint": "Google AI Studio API Key (from aistudio.google.com)"
+    }
+  },
+  "model_config": {
+    "llm": {
+      "timeout": {
+        "name": "Timeout",
+        "type": "integer",
+        "default": 120,
+        "min": 1,
+        "hint": "Request timeout in seconds"
+      },
+      "temperature": {
+        "name": "Temperature",
+        "type": "float",
+        "default": null,
+        "min": 0,
+        "max": 2,
+        "hint": "Model temperature (0-2)"
+      },
+      "thinking": {
+        "name": "Thinking (Reasoning)",
+        "type": "switch",
+        "default": false,
+        "hint": "Enable thinking/reasoning mode for supported models (e.g. gemini-2.5-flash)"
+      },
+      "thinking_budget": {
+        "name": "Thinking Budget",
+        "type": "integer",
+        "default": 8192,
+        "min": 128,
+        "max": 65536,
+        "hint": "Max tokens for thinking when thinking mode is enabled"
+      }
+    },
+    "embedding": {
+      "timeout": {
+        "name": "Timeout",
+        "type": "integer",
+        "default": 60,
+        "min": 1,
+        "hint": "Request timeout in seconds"
+      }
+    },
+    "image": {
+      "aspect_ratio": {
+        "name": "Aspect Ratio",
+        "type": "string",
+        "default": null,
+        "enum": ["1:1", "9:16", "16:9", "3:4", "4:3"],
+        "hint": "Output image aspect ratio"
+      }
+    }
+  }
+}

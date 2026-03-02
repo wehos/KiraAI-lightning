@@ -451,7 +451,12 @@ class MessageProcessor:
         max_agent_steps = max_tool_loop + 1
 
         for _ in range(max_agent_steps):
-            llm_resp = await llm_model.chat(request)
+            try:
+                llm_resp = await llm_model.chat(request)
+            except Exception as e:
+                logger.error(f"LLM chat call failed: {e}")
+                llm_resp = LLMResponse(text_response=f"[系统错误] LLM 调用失败: {e}")
+
             if llm_resp:
                 llm_logger.debug(llm_resp)
                 llm_logger.info(
@@ -640,9 +645,29 @@ class MessageProcessor:
         return result
 
     async def _parse_xml_msg(self, xml_data):
-        """Parse xml to list[list[BaseMessageElement]]"""
-        root = ET.fromstring(f"<root>{xml_data}</root>")
+        """Parse xml to list[list[BaseMessageElement]]
+
+        If xml_data contains no <msg> tags (e.g. provider returns plain text),
+        fall back to wrapping the entire text as a single text message.
+        """
+        try:
+            root = ET.fromstring(f"<root>{xml_data}</root>")
+        except ET.ParseError:
+            # XML parse failed — treat entire response as plain text
+            logger.warning(f"XML parse failed, falling back to plain text")
+            if xml_data.strip():
+                return [[Text(xml_data.strip())]]
+            return []
+
         message_list = []
+
+        # Fallback: if no <msg> tags found, treat as plain text
+        if not root.findall("msg"):
+            plain = xml_data.strip()
+            if plain:
+                logger.warning(f"No <msg> tags found in LLM response, sending as plain text")
+                return [[Text(plain)]]
+            return []
 
         for msg in root.findall("msg"):
             message_elements = []

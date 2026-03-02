@@ -6,8 +6,11 @@ from datetime import datetime
 import uuid
 
 from .statistics import Statistics
+from core.logging_manager import get_logger
 
 from core.chat import KiraMessageEvent, KiraCommentEvent
+
+logger = get_logger("event_bus", "cyan")
 
 
 class EventType(Enum):
@@ -137,6 +140,7 @@ class EventBus:
                     self.stats.set_stats("event_bus", self.event_bus_stats)
 
             except Exception as e:
+                logger.error(f"❌ Event processing error: {e}", exc_info=True)
                 self.event_bus_stats["errors"] += 1
                 self.stats.set_stats("event_bus", self.event_bus_stats)
 
@@ -150,6 +154,7 @@ class EventBus:
                 try:
                     await handler(event)
                 except Exception as e:
+                    logger.error(f"❌ Event handler error: {e}", exc_info=True)
                     self.event_bus_stats["errors"] += 1
                     self.stats.set_stats("event_bus", self.event_bus_stats)
 

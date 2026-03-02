@@ -1,0 +1,7 @@
+{
+    "name": "Gemini",
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "Google Gemini Provider (native google.genai SDK)",
+    "repo": null
+}
