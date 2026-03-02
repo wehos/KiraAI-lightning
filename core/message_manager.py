@@ -217,7 +217,12 @@ class MessageProcessor:
     async def handle_im_message(self, event: KiraMessageEvent):
         """process im message"""
         logger.info(event.get_log_info())
+        try:
+            await self._handle_im_message_inner(event)
+        except Exception as e:
+            logger.error(f"❌ handle_im_message crashed: {e}", exc_info=True)
 
+    async def _handle_im_message_inner(self, event: KiraMessageEvent):
         # decorating event info
 
         sid = event.session.sid
@@ -228,11 +233,15 @@ class MessageProcessor:
 
         # EventType.ON_IM_MESSAGE
         im_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_IM_MESSAGE)
+        logger.debug(f"[TRACE] ON_IM_MESSAGE handlers: {len(im_handlers)}, is_mentioned={event.is_mentioned}")
         for handler in im_handlers:
             await handler.exec_handler(event)
             if event.is_stopped:
+                logger.info(f"[TRACE] Event stopped by handler, strategy={event.process_strategy}")
                 return
+        logger.info(f"[TRACE] process_strategy={event.process_strategy} for {sid}")
         if event.process_strategy == "discard":
+            logger.info(f"[TRACE] Message discarded for {sid}")
             return
 
         if event.process_strategy == "trigger":
@@ -290,6 +299,13 @@ class MessageProcessor:
 
     async def handle_im_batch_message(self, event: KiraMessageBatchEvent):
         # Start processing
+        sid = event.session.sid
+        try:
+            await self._handle_im_batch_message_inner(event)
+        except Exception as e:
+            logger.error(f"❌ handle_im_batch_message crashed for {sid}: {e}", exc_info=True)
+
+    async def _handle_im_batch_message_inner(self, event: KiraMessageBatchEvent):
         sid = event.session.sid
 
         for i, message in enumerate(event.messages):
