@@ -292,7 +292,8 @@ class PluginManager:
             hook.handler = bound_handler
             event_handler_reg.register(hook)
         if hooks:
-            logger.info(f"Registered {len(hooks)} hooks from {plugin_id}")
+            hook_types = [f"{h.event_type.value}(priority={h.priority})" for h in hooks]
+            logger.info(f"Registered {len(hooks)} hooks from {plugin_id}: {hook_types}")
 
     def register_plugin_tools(self) -> None:
         for plugin_id in _plugin_components.keys():
@@ -359,11 +360,16 @@ class PluginManager:
 
         discovered = list(_plugin_classes.keys())
         logger.info(f"Discovered plugins: {discovered}")
+        logger.info(f"Plugin components keys: {list(_plugin_components.keys())}")
 
         for plugin_id in _plugin_classes.keys():
             if plugin_id in self.plugin_instances:
                 continue
             await self.init_plugin(plugin_id)
+
+        # Summary of registered handlers
+        all_handlers = {et.value: len(event_handler_reg.get_handlers(et)) for et in EventType}
+        logger.info(f"Handler registration summary: {all_handlers}")
 
     async def init_plugin(self, plugin_id: Optional[str] = None):
         if plugin_id is None:

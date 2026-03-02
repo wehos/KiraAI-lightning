@@ -233,7 +233,7 @@ class MessageProcessor:
 
         # EventType.ON_IM_MESSAGE
         im_handlers = event_handler_reg.get_handlers(event_type=EventType.ON_IM_MESSAGE)
-        logger.debug(f"[TRACE] ON_IM_MESSAGE handlers: {len(im_handlers)}, is_mentioned={event.is_mentioned}")
+        logger.info(f"[TRACE] ON_IM_MESSAGE handlers: {len(im_handlers)}, is_mentioned={event.is_mentioned}")
         for handler in im_handlers:
             await handler.exec_handler(event)
             if event.is_stopped:
