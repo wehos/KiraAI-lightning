@@ -376,7 +376,7 @@ class QQAdapter(IMAdapter):
                     is_mentioned = True
                     break
             elif m.get("type") == "text":
-                message_text = m.get("data").get("text")
+                message_text = (m.get("data") or {}).get("text", "")
                 waking_keywords_config = self.config.get("waking_keywords", [])
                 if waking_keywords_config:
                     if isinstance(waking_keywords_config, str):
@@ -393,7 +393,7 @@ class QQAdapter(IMAdapter):
         message_list = await self.process_incoming_message(msg)
 
         group_info = await self.bot.get_group_info(msg.get("group_id"))
-        group_name = group_info.get("data").get("group_name")
+        group_name = (group_info.get("data") or {}).get("group_name", "")
 
         message_obj = KiraMessageEvent(
             adapter=self.info,
@@ -406,7 +406,7 @@ class QQAdapter(IMAdapter):
                 ),
                 sender=User(
                     user_id=str(msg.get("user_id")),
-                    nickname=msg.get("sender").get("nickname")
+                    nickname=(msg.get("sender") or {}).get("nickname", "")
                 ),
                 is_mentioned=is_mentioned,
                 message_id=str(msg.get("message_id")),
@@ -438,7 +438,7 @@ class QQAdapter(IMAdapter):
                 timestamp=int(msg.get("time") or time.time()),
                 sender=User(
                     user_id=str(msg.get("user_id")),
-                    nickname=msg.get("sender").get("nickname")
+                    nickname=(msg.get("sender") or {}).get("nickname", "")
                 ),
                 message_id=str(msg.get("message_id")),
                 is_mentioned=True,
