@@ -15,3 +15,6 @@ fastmcp==2.14.4
 httpx>=0.28.1
 PyYAML>=6.0.1
 rank-bm25>=0.2.2
+tomli>=1.2.0
+tomli_w>=1.0.0
+jieba>=0.42.1

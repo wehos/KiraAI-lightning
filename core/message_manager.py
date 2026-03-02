@@ -40,7 +40,7 @@ from core.llm_client import LLMClient
 from core.chat.memory_manager import MemoryManager
 from .prompt_manager import PromptManager
 from .provider import ProviderManager, LLMRequest, LLMResponse
-from core.plugin.plugin_handlers import event_handler_reg, EventType
+from core.event_handlers import event_handler_reg, EventType
 
 logger = get_logger("message_processor", "cyan")
 llm_logger = get_logger("llm", "purple")
@@ -329,8 +329,8 @@ class MessageProcessor:
 
         # Get chat history memory
         session_memory = self.memory_manager.fetch_memory(sid)
-        # Get core memory
-        core_memory = self.memory_manager.get_core_memory()
+        # Core memory is now managed through TomlTreeStore, pass empty for legacy prompt slot
+        core_memory = ""
 
         # 构建用户标识（跨 recall / profile 复用）
         user_key = f"{event.adapter.name}:{event.messages[-1].sender.user_id}"

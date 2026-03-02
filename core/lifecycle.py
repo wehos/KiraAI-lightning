@@ -15,8 +15,8 @@ from .tool_manager import register_all_tools
 from .event_bus import EventBus
 from .persona import PersonaManager
 from .provider import ProviderManager
-from .plugin import PluginContext, PluginManager
 from core.agent.mcp_mgr import MCPManager
+from core.chat.persona_evolution import PersonaEvolutionEngine
 
 
 logger = get_logger("lifecycle", "blue")
@@ -29,36 +29,30 @@ class KiraLifecycle:
         self.stats = stats
 
         self.kira_config: Optional[KiraConfig] = None
-
         self.provider_manager: Optional[ProviderManager] = None
-
         self.llm_api: Optional[LLMClient] = None
-
         self.adapter_manager: Optional[AdapterManager] = None
-
         self.memory_manager: Optional[MemoryManager] = None
-
         self.persona_manager: Optional[PersonaManager] = None
-
         self.prompt_manager: Optional[PromptManager] = None
-
         self.message_processor: Optional[MessageProcessor] = None
-
         self.sticker_manager: Optional[StickerManager] = None
-
         self.event_bus: Optional[EventBus] = None
-
-        self.plugin_context: Optional[PluginContext] = None
-
-        self.plugin_manager: Optional[PluginManager] = None
-
         self.mcp_manager: Optional[MCPManager] = None
+        self.persona_evolution: Optional[PersonaEvolutionEngine] = None
         self.tasks: list[asyncio.Task] = []
 
     async def schedule_tasks(self):
         self.tasks = [
-            asyncio.create_task(self.sticker_manager.scan_and_register_sticker(), name="sticker_scan"),
-            asyncio.create_task(self._memory_forgetting_loop(), name="memory_forgetting")
+            asyncio.create_task(
+                self.sticker_manager.scan_and_register_sticker(), name="sticker_scan"
+            ),
+            asyncio.create_task(
+                self._memory_forgetting_loop(), name="memory_forgetting"
+            ),
+            asyncio.create_task(
+                self._persona_evolution_loop(), name="persona_evolution"
+            ),
         ]
         results = await asyncio.gather(*self.tasks, return_exceptions=True)
         for i, result in enumerate(results):
@@ -73,12 +67,26 @@ class KiraLifecycle:
                 if self.memory_manager:
                     await self.memory_manager.run_forgetting_cycle()
                     logger.info("Memory forgetting cycle completed")
-                await asyncio.sleep(86400)  # 每 24 小时运行一次
+                await asyncio.sleep(86400)  # 每 24 小时
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Memory forgetting cycle error: {e}")
-                await asyncio.sleep(60)  # 失败后等待 60 秒再重试, 避免日志风暴
+                await asyncio.sleep(60)
+
+    async def _persona_evolution_loop(self):
+        """定期运行人设演进周期"""
+        while True:
+            try:
+                if self.persona_evolution and self.llm_api:
+                    await self.persona_evolution.run_evolution_cycle(self.llm_api)
+                    logger.info("Persona evolution cycle completed")
+                await asyncio.sleep(86400 * 7)  # 每 7 天
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Persona evolution cycle error: {e}")
+                await asyncio.sleep(60)
 
     async def init_and_run_system(self):
         """主函数：负责启动和初始化各个模块"""
@@ -91,7 +99,7 @@ class KiraLifecycle:
         # ====== init KiraAI config ======
         self.kira_config = KiraConfig()
 
-        # ====== init ProviderManager config ======
+        # ====== init ProviderManager ======
         self.provider_manager = ProviderManager(self.kira_config)
 
         # ====== init LLMClient ======
@@ -99,18 +107,23 @@ class KiraLifecycle:
         await register_all_tools(self.llm_api)
 
         # ====== init adapter manager ======
-        self.adapter_manager = AdapterManager(self.kira_config, loop, event_queue, self.llm_api)
+        self.adapter_manager = AdapterManager(
+            self.kira_config, loop, event_queue, self.llm_api
+        )
         await self.adapter_manager.initialize()
 
         # ====== init sticker manager ======
         self.sticker_manager = StickerManager(self.llm_api)
 
         # ====== init memory manager ======
-        self.memory_manager = MemoryManager(self.kira_config, llm_client=self.llm_api)
+        self.memory_manager = MemoryManager(
+            self.kira_config, llm_client=self.llm_api
+        )
 
         # Inject memory_manager into memory tools
         try:
             from data.tools.memory import set_memory_manager
+
             set_memory_manager(self.memory_manager)
         except (ImportError, ModuleNotFoundError, AttributeError) as e:
             logger.warning(f"Failed to inject memory_manager into tools: {e}")
@@ -118,19 +131,28 @@ class KiraLifecycle:
         # ====== init persona manager ======
         self.persona_manager = PersonaManager()
 
+        # ====== init persona evolution engine ======
+        self.persona_evolution = PersonaEvolutionEngine(
+            self.memory_manager.tree_store, self.persona_manager
+        )
+
         # ====== init prompt manager ======
-        self.prompt_manager = PromptManager(self.kira_config,
-                                            self.sticker_manager,
-                                            self.persona_manager)
+        self.prompt_manager = PromptManager(
+            self.kira_config, self.sticker_manager, self.persona_manager
+        )
 
         # ====== init message processor ======
-        self.message_processor = MessageProcessor(self.kira_config,
-                                                  self.llm_api,
-                                                  self.provider_manager,
-                                                  self.memory_manager,
-                                                  self.prompt_manager)
+        self.message_processor = MessageProcessor(
+            self.kira_config,
+            self.llm_api,
+            self.provider_manager,
+            self.memory_manager,
+            self.prompt_manager,
+        )
 
-        self.event_bus = EventBus(self.stats, event_queue, self.message_processor)
+        self.event_bus = EventBus(
+            self.stats, event_queue, self.message_processor
+        )
 
         # ====== init MCP manager ======
         try:
@@ -139,32 +161,19 @@ class KiraLifecycle:
         except Exception as e:
             logger.error(f"Failed to initialize MCPManager: {e}")
 
-        # ====== init plugin system ======
-        self.plugin_context = PluginContext(
-            config=self.kira_config,
-            event_bus=self.event_bus,
-            provider_mgr=self.provider_manager,
-            llm_api=self.llm_api,
-            adapter_mgr=self.adapter_manager,
-            persona_mgr=self.persona_manager,
-            memory_mgr=self.memory_manager,
-            message_processor=self.message_processor
-        )
-
-        self.plugin_manager = PluginManager(self.plugin_context)
-        self.plugin_context.plugin_mgr = self.plugin_manager
-        await self.plugin_manager.init()
-
         # ====== schedule tasks ======
         asyncio.create_task(self.schedule_tasks())
 
-        # expose adapters and loop globally for runtime usage everywhere
+        # expose adapters globally for runtime usage
         from core.services.runtime import set_adapters
+
         set_adapters(self.adapter_manager.get_adapters())
 
         self.stats.set_stats("started_ts", int(time.time()))
 
-        logger.info("All modules initialized, starting message processing loop...")
+        logger.info(
+            "All modules initialized, starting message processing loop..."
+        )
 
         await self.event_bus.dispatch()
 

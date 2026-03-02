@@ -7,8 +7,15 @@ from .message_utils import (
     KiraCommentEvent,
     MessageChain,
 )
-from .tree_store import MarkdownTreeStore, MarkdownMemory
-from .user_profile import UserProfileStore, UserProfile
+from .memory_index import MemoryIndex
+from .toml_tree_store import TomlTreeStore, Memory
+from .entity_profile import EntityProfileStore, EntityProfile
+from .memory_paths import (
+    MEMORY_ROOT,
+    GLOBAL_DIR,
+    ENTITIES_DIR,
+    ensure_directory_structure,
+)
 
 __all__ = [
     "KiraCommentEvent",
@@ -16,12 +23,17 @@ __all__ = [
     "KiraIMMessage",
     "KiraIMSentResult",
     "KiraMessageBatchEvent",
-    "MarkdownMemory",
+    "MemoryIndex",
+    "Memory",
+    "TomlTreeStore",
     "MessageChain",
     "Session",
     "Group",
     "User",
-    "UserProfile",
-    "UserProfileStore",
-    "MarkdownTreeStore",
+    "EntityProfile",
+    "EntityProfileStore",
+    "MEMORY_ROOT",
+    "GLOBAL_DIR",
+    "ENTITIES_DIR",
+    "ensure_directory_structure",
 ]
