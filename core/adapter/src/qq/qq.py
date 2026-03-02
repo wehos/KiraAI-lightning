@@ -50,7 +50,7 @@ class QQAdapter(IMAdapter):
     def __init__(self, info, loop: asyncio.AbstractEventLoop, event_bus: asyncio.Queue, llm_api):
         super().__init__(info, loop, event_bus, llm_api)
         self.emoji_dict = self._load_dict(os.path.join(os.path.dirname(os.path.abspath(__file__)), "emoji.json"))
-        self.message_types = ["text", "img", "at", "reply", "record", "emoji", "sticker", "poke", "selfie", "file"]
+        self.message_types = ["text", "img", "at", "reply", "record", "sticker", "poke", "selfie", "file"]
         self.bot: NapCatWebSocketClient = NapCatWebSocketClient()
         self.logger = get_logger(info.name, "blue")
 

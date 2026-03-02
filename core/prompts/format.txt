@@ -39,12 +39,6 @@
     <text>response text 2...</text>
 </msg>
 
-发送表情示例：
-<msg>
-    <text>some text...</text>
-    <emoji>21</emoji>
-</msg>
-
 发送戳一戳示例：
 <msg>
     <poke>3429924750</poke>
