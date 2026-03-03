@@ -41,36 +41,125 @@ class MemoryExtractor:
         self._llm_client = llm_client
 
     # ==========================================
-    # 事实提取
+    # 事实提取（双路径）
     # ==========================================
 
-    async def extract_facts(self, conversation_text: str) -> list[dict]:
-        """从对话文本中提取结构化事实
+    async def extract_personal_facts(self, conversation_text: str) -> list[dict]:
+        """从对话中提取个人事实（用户级）
+
+        专注于每位用户的偏好、身份、经历、观点、习惯等。
+        结果将路由到各用户的 entity 目录下。
 
         Returns:
-            [{"content": "...", "importance": 7, "tags": [...], "subject": "user",
-              "semantic_id": "hates_css"}, ...]
+            [{"content": "...", "importance": 7, "tags": [...],
+              "speaker_id": "12345", "subject": "昵称", "semantic_id": "..."}, ...]
         """
         if not self._llm_client:
             return []
 
-        prompt = f"""分析以下对话片段，提取关键事实。忽略寒暄和无意义内容。
+        prompt = f"""分析以下对话片段，提取每位用户的**个人事实**。忽略寒暄和无意义内容。
 对话中每位用户的格式为 "昵称(ID): 内容"，请注意区分不同用户。
 
-你需要**同时**提取两类事实：
-1. **个人事实**：关于某位用户的偏好、身份、经历、观点等（subject = 用户昵称, speaker_id = 用户ID）
-2. **群组事实**：关于群聊整体的信息，如群氛围、常见话题、群规等（subject = "group", speaker_id = ""）
+只关注个人层面的信息，包括：
+- 用户的偏好、喜好、厌恶
+- 身份信息（职业、年龄、所在地等）
+- 个人经历、故事
+- 观点、立场
+- 习惯、性格特征
 
 对话:
 {conversation_text}
 
 请以 JSON 数组格式输出，每条事实包含：
-- "speaker_id": 该事实所属用户的 ID（从对话中括号内提取，如 "12345"；如果是群组级信息则留空 ""）
-- "subject": 主语（具体用户昵称，或 "group" 表示群组级信息）
-- "content": 事实描述。**必须包含主语**，写成完整的陈述句，让人脱离上下文也能看懂是关于谁的。例如：✅ "小明是一名医生" ✅ "该群经常讨论编程话题" ❌ "是一名医生"（缺少主语，不知道在说谁）
+- "speaker_id": 该事实所属用户的 ID（从对话中括号内提取，如 "12345"）
+- "subject": 该用户的昵称
+- "content": 事实描述，用该用户昵称作主语，写成完整陈述句。例如：✅ "小明喜欢用Python" ✅ "阿花是一名大三学生" ❌ "该用户喜欢Python"（禁止使用"该用户"）
 - "importance": 重要性评分(1-10)
 - "tags": 相关标签数组
-- "semantic_id": 一个简短的 snake_case 语义标识符，用作文件名（如 "xiaoming_is_doctor", "group_discusses_programming"）
+- "semantic_id": 简短 snake_case 标识符（如 "xiaoming_likes_python"）
+
+**严禁使用"该用户""该成员""此人"等模糊代词，必须用具体昵称。**
+
+只输出 JSON 数组，不要有其他内容。如果没有值得记录的个人事实，输出空数组 []。"""
+
+        try:
+            resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+            if resp and resp.text_response:
+                return self._parse_json_array(resp.text_response)
+        except Exception as e:
+            logger.error(f"Personal fact extraction error: {e}")
+        return []
+
+    async def extract_group_facts(self, conversation_text: str) -> list[dict]:
+        """从对话中提取群组事实（群级）
+
+        专注于群聊整体的信息：氛围、话题、成员关系、群体特征。
+        结果将路由到群组 entity 目录下。
+
+        Returns:
+            [{"content": "...", "importance": 7, "tags": [...],
+              "subject": "group", "semantic_id": "..."}, ...]
+        """
+        if not self._llm_client:
+            return []
+
+        prompt = f"""分析以下群聊对话片段，提取**群组级别**的信息。忽略寒暄和无意义内容。
+对话中每位用户的格式为 "昵称(ID): 内容"。
+
+只关注群聊层面的信息，包括：
+- 群聊的常见话题和讨论方向
+- 群体氛围、文化特征
+- 成员之间的互动关系和社交动态（如"小明和阿花经常互怼"）
+- 群内的共识、群规、惯例
+- 群内事件（如群友组织活动、群聊里发生的趣事）
+
+对话:
+{conversation_text}
+
+请以 JSON 数组格式输出，每条事实包含：
+- "speaker_id": 留空 ""
+- "subject": "group"
+- "content": 事实描述，写成关于群聊的完整陈述句。涉及具体成员时必须用昵称，例如：✅ "群里最近在讨论AI绘画" ✅ "小明和阿花经常在群里互怼" ✅ "群友们普遍偏好深夜聊天" ❌ "该用户经常发言"（禁止使用"该用户"，且这不是群级信息）
+- "importance": 重要性评分(1-10)
+- "tags": 相关标签数组
+- "semantic_id": 简短 snake_case 标识符（如 "group_discusses_ai_art"）
+
+**严禁使用"该用户""该成员""此人"等模糊代词，涉及具体人时用昵称。**
+**不要提取个人偏好/身份等个人事实，那些由另一个流程处理。**
+
+只输出 JSON 数组，不要有其他内容。如果没有值得记录的群组事实，输出空数组 []。"""
+
+        try:
+            resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+            if resp and resp.text_response:
+                return self._parse_json_array(resp.text_response)
+        except Exception as e:
+            logger.error(f"Group fact extraction error: {e}")
+        return []
+
+    async def extract_facts(self, conversation_text: str) -> list[dict]:
+        """从对话中提取事实（私聊兼容接口）
+
+        私聊场景只有一个用户，不需要双路径，走单次提取即可。
+        """
+        if not self._llm_client:
+            return []
+
+        prompt = f"""分析以下对话片段，提取关键事实。忽略寒暄和无意义内容。
+对话中用户的格式为 "昵称(ID): 内容"。
+
+对话:
+{conversation_text}
+
+请以 JSON 数组格式输出，每条事实包含：
+- "speaker_id": 该事实所属用户的 ID（从对话中括号内提取，如 "12345"）
+- "subject": 该用户的昵称
+- "content": 事实描述，用昵称作主语，写成完整陈述句。例如：✅ "小明喜欢吃辣" ❌ "该用户喜欢吃辣"
+- "importance": 重要性评分(1-10)
+- "tags": 相关标签数组
+- "semantic_id": 简短 snake_case 标识符（如 "xiaoming_likes_spicy"）
+
+**严禁使用"该用户"等模糊代词，必须用具体昵称。**
 
 只输出 JSON 数组，不要有其他内容。如果没有值得记录的事实，输出空数组 []。"""
 
@@ -318,7 +407,17 @@ class MemoryExtractor:
             f"{i + 1}. {f.text}" for i, f in enumerate(facts)
         )
 
-        prompt = f"""基于以下关于用户的事实，你能推断出什么更高层面的洞察？
+        if entity_type == "group":
+            prompt = f"""基于以下关于这个群聊的事实，你能推断出什么更高层面的洞察？
+比如群体性格、社交动态、群文化特征等。涉及具体成员时用昵称，不要说"该用户"。
+
+事实:
+{facts_text}
+
+请输出 1-3 条简洁的洞察，每条一行，不需要编号。只输出洞察内容，不要有其他内容。"""
+        else:
+            prompt = f"""基于以下关于这位用户的事实，你能推断出什么更高层面的洞察？
+比如性格特征、兴趣偏好的模式、生活方式等。用该用户的昵称作主语，不要说"该用户"。
 
 事实:
 {facts_text}

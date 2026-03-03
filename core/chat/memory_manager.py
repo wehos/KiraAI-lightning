@@ -437,7 +437,10 @@ class MemoryManager:
         return session_entity_id, session_entity_type
 
     async def _hippocampus_process(self, session: str, chunks: list):
-        """海马体后台处理：提取事实 → 程序化路由到正确 entity → 去重存储 → 升维反思 → 更新画像"""
+        """海马体后台处理：提取事实 → 路由到正确 entity → 去重存储 → 升维反思 → 更新画像
+
+        群聊走双路径（个人 + 群组分别提取），私聊走单路径。
+        """
         if not self._llm_client:
             logger.debug("LLM client not set, skipping hippocampus processing")
             return
@@ -448,49 +451,67 @@ class MemoryManager:
             unique_senders = self._get_unique_senders(chunks)
             logger.debug(f"Hippocampus sender_map: {sender_map}, unique_senders: {unique_senders}")
 
-            # 2. 提取事实（LLM）
-            conversation_text = self._chunks_to_text(chunks)
-            facts = await self.extractor.extract_facts(conversation_text)
-
-            if not facts:
-                return
-
-            # 3. 解析 session 级别的 entity（用于群组级事实和兜底）
+            # 2. 解析 session 级别的 entity
             session_entity_id, session_entity_type = self._parse_entity_from_session(session)
             adapter = session.split(":", maxsplit=1)[0]
+            is_group = session_entity_type == ENTITY_GROUP
 
-            # 4. 程序化路由每条事实 → 去重存储（铁律 #1）
+            # 3. 提取事实（LLM）— 群聊双路径，私聊单路径
+            conversation_text = self._chunks_to_text(chunks)
+
+            if is_group:
+                # 双路径并行提取
+                personal_facts, group_facts = await asyncio.gather(
+                    self.extractor.extract_personal_facts(conversation_text),
+                    self.extractor.extract_group_facts(conversation_text),
+                )
+                logger.info(
+                    f"Hippocampus dual-path: {len(personal_facts)} personal, "
+                    f"{len(group_facts)} group facts"
+                )
+            else:
+                personal_facts = await self.extractor.extract_facts(conversation_text)
+                group_facts = []
+
+            if not personal_facts and not group_facts:
+                return
+
+            # 4. 路由 + 去重存储
             routed_entities = set()
-            for fact in facts:
+
+            # 4a. 个人事实 → 程序化路由到用户 entity
+            for fact in personal_facts:
                 entity_id, entity_type = self._resolve_fact_entity(
                     fact, adapter, sender_map, unique_senders,
                     session_entity_id, session_entity_type,
                 )
-
-                # 存到 group 的事实：确保 content 带主语，脱离上下文也看得懂是关于谁
-                # 存到 user 的事实：不需要，因为目录本身就标识了用户
-                if entity_type == ENTITY_GROUP:
-                    subject = (fact.get("subject", "") or "").strip()
-                    content = fact.get("content", "").strip()
-                    if content and subject and subject.lower() != "group":
-                        if not content.startswith(subject):
-                            fact["content"] = f"{subject}{content}"
-
                 logger.debug(
-                    f"Fact routed: '{fact.get('content', '')[:40]}...' → {entity_type}:{entity_id}"
+                    f"Personal fact routed: '{fact.get('content', '')[:40]}...' "
+                    f"→ {entity_type}:{entity_id}"
                 )
                 await self.extractor.deduplicate_and_store(
                     fact, entity_id, entity_type
                 )
                 routed_entities.add((entity_id, entity_type))
 
+            # 4b. 群组事实 → 直接存到群组 entity
+            for fact in group_facts:
+                logger.debug(
+                    f"Group fact stored: '{fact.get('content', '')[:40]}...' "
+                    f"→ {ENTITY_GROUP}:{session_entity_id}"
+                )
+                await self.extractor.deduplicate_and_store(
+                    fact, session_entity_id, ENTITY_GROUP
+                )
+                routed_entities.add((session_entity_id, ENTITY_GROUP))
+
             # 5. 检查升维触发（铁律 #2）— 对所有涉及的 entity 检查
             for eid, etype in routed_entities:
                 if await self.extractor.check_elevation_trigger(eid, etype):
                     await self.extractor.generate_reflections(eid, etype)
 
-            # 6. 更新画像（铁律 #3 — 按路由后的 entity 分组更新）
-            for fact in facts:
+            # 6. 更新画像（铁律 #3 — 只对用户 entity 更新画像）
+            for fact in personal_facts:
                 entity_id, entity_type = self._resolve_fact_entity(
                     fact, adapter, sender_map, unique_senders,
                     session_entity_id, session_entity_type,
@@ -498,7 +519,12 @@ class MemoryManager:
                 if entity_type == ENTITY_USER:
                     await self._update_profile_from_facts(entity_id, entity_type, [fact])
 
-            logger.info(f"Hippocampus completed for session {session}: {len(facts)} facts, senders={unique_senders}")
+            total = len(personal_facts) + len(group_facts)
+            logger.info(
+                f"Hippocampus completed for session {session}: "
+                f"{total} facts ({len(personal_facts)} personal + {len(group_facts)} group), "
+                f"senders={unique_senders}"
+            )
         except Exception as e:
             logger.error(f"Hippocampus processing error: {e}", exc_info=True)
 
