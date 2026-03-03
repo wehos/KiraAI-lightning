@@ -31,8 +31,13 @@ class DefaultPlugin(BasePlugin):
 
     async def initialize(self):
         scope = "所有群" if self._enabled_groups is None else f"群: {self._enabled_groups}"
-        img_info = f", image: {self._welcome_image}" if self._welcome_image else ", no image"
+        img_info = f", image: '{self._welcome_image}'" if self._welcome_image else ", no image configured"
         logger.info(f"[Welcome Plugin] enabled for {scope}{img_info}")
+        if self._welcome_image:
+            img = Image(image=self._welcome_image)
+            logger.info(f"[Welcome Plugin] image type: {img.image_type}, url={img.url}, b64={'yes' if img.base64 else 'no'}")
+            if img.image_type == "unknown":
+                logger.warning(f"[Welcome Plugin] image path/url invalid or file not found: {self._welcome_image}")
 
     async def terminate(self):
         pass
@@ -70,6 +75,7 @@ class DefaultPlugin(BasePlugin):
                 logger.info(f"[Welcome] New member {new_user_id} joined group {group_id}")
 
                 # 如果配置了固定图片，在 LLM 问候语发出后追加发送
+                logger.info(f"[Welcome] welcome_image config: '{self._welcome_image}'")
                 if self._welcome_image:
                     adapter_name = event.adapter.name
                     target = f"{adapter_name}:gm:{group_id}"
