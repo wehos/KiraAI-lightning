@@ -395,7 +395,7 @@ class QQAdapter(IMAdapter):
                 if waking_keywords and any(kw in full_text for kw in waking_keywords):
                     should_respond = True
                     is_mentioned = True
-                    logger.info(f"[Keyword Wake] matched in: '{full_text[:50]}', keywords={waking_keywords}")
+                    self.logger.info(f"[Keyword Wake] matched in: '{full_text[:50]}', keywords={waking_keywords}")
 
         # should_respond = True
 

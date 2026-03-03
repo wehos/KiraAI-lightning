@@ -81,7 +81,16 @@ class DefaultPlugin(BasePlugin):
         """等 LLM 问候语发出后，追加发送固定欢迎图片"""
         await asyncio.sleep(8)  # 等待 LLM 回复先到达
         try:
-            chain = MessageChain([Image(image=self._welcome_image)])
+            img = Image(image=self._welcome_image)
+            # QQ adapter 只认 url 和 base64，本地路径需要先转 base64
+            if img.image_type == "path":
+                b64 = await img.to_base64()
+                if b64:
+                    img = Image(b64=b64)
+                else:
+                    logger.warning(f"[Welcome] Failed to convert image to base64: {self._welcome_image}")
+                    return
+            chain = MessageChain([img])
             msg_processor = self.ctx.message_processor
             await msg_processor.send_message_chain(target, chain)
             logger.info(f"[Welcome] Sent welcome image to {target} for new member {new_user_id}")

@@ -4,11 +4,15 @@
 完全基于 TomlTreeStore + EntityProfileStore，
 移除所有 core.txt / core_vector_map.json 遗留逻辑。
 支持 user / group / channel / global 四种实体域。
+
+entity_id 自动推断：
+当 LLM 未提供 entity_id 时，从 event context 自动推断。
+默认策略：关联到当前发言用户（即使在群聊中）。
 """
 
 import asyncio
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from core.utils.tool_utils import BaseTool
 from core.logging_manager import get_logger
@@ -25,6 +29,21 @@ def set_memory_manager(manager):
     _memory_manager = manager
 
 
+def _resolve_entity_from_event(event) -> Tuple[str, str]:
+    """从 event context 推断 entity_id 和 entity_type。
+
+    默认策略：始终关联到当前发言用户。
+    即使在群聊中，记录的也是"某用户说了什么"。
+    """
+    try:
+        adapter_name = event.adapter.name
+        sender_id = event.messages[-1].sender.user_id
+        return f"{adapter_name}:{sender_id}", "user"
+    except (AttributeError, IndexError) as e:
+        logger.warning(f"Failed to resolve entity from event: {e}")
+        return "", "user"
+
+
 class MemoryAddTool(BaseTool):
     name = "memory_add"
     description = "添加一条记忆到长期记忆系统"
@@ -32,10 +51,13 @@ class MemoryAddTool(BaseTool):
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "要记录的记忆文本"},
-            "entity_id": {"type": "string", "description": "实体ID（用户ID、群组ID等）"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
-                "description": "实体类型: user, group, channel",
+                "description": "实体类型: user, group, channel（可省略，默认user）",
                 "enum": ["user", "group", "channel"],
             },
             "importance": {
@@ -68,6 +90,11 @@ class MemoryAddTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
 
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
+
         try:
             importance = max(1, min(10, int(importance)))
         except (TypeError, ValueError):
@@ -91,7 +118,7 @@ class MemoryAddTool(BaseTool):
                 entity_type=entity_type,
                 folder=folder,
             )
-            return f"Memory added: id={entry.id}, type={memory_type}"
+            return f"Memory added: id={entry.id}, type={memory_type}, entity={entity_id}"
         except Exception as e:
             logger.error(f"MemoryAddTool error: {e}")
             return f"Failed to add memory: {e}"
@@ -105,7 +132,10 @@ class MemoryUpdateTool(BaseTool):
         "properties": {
             "memory_id": {"type": "string", "description": "记忆ID"},
             "text": {"type": "string", "description": "更新后的记忆文本"},
-            "entity_id": {"type": "string", "description": "实体ID"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
                 "description": "实体类型",
@@ -120,20 +150,25 @@ class MemoryUpdateTool(BaseTool):
                 "description": "新的重要性评分（可选）",
             },
         },
-        "required": ["memory_id", "text", "entity_id"],
+        "required": ["memory_id", "text"],
     }
 
     async def execute(
         self,
         memory_id: str,
         text: str,
-        entity_id: str,
+        entity_id: str = "",
         entity_type: str = "user",
         folder: str = "facts",
         importance: int = None,
     ) -> str:
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
+
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
         memory = await _memory_manager.tree_store.get_memory(
             memory_id=memory_id,
@@ -164,7 +199,10 @@ class MemoryRemoveTool(BaseTool):
         "type": "object",
         "properties": {
             "memory_id": {"type": "string", "description": "记忆ID"},
-            "entity_id": {"type": "string", "description": "实体ID"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
                 "description": "实体类型",
@@ -175,18 +213,23 @@ class MemoryRemoveTool(BaseTool):
                 "description": "所在目录: facts, reflections, episodic",
             },
         },
-        "required": ["memory_id", "entity_id"],
+        "required": ["memory_id"],
     }
 
     async def execute(
         self,
         memory_id: str,
-        entity_id: str,
+        entity_id: str = "",
         entity_type: str = "user",
         folder: str = "facts",
     ) -> str:
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
+
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
         if await _memory_manager.tree_store.archive_memory(
             memory_id=memory_id,
@@ -205,7 +248,10 @@ class MemorySearchTool(BaseTool):
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "搜索查询文本"},
-            "entity_id": {"type": "string", "description": "实体ID（可选）"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
                 "description": "实体类型",
@@ -225,6 +271,11 @@ class MemorySearchTool(BaseTool):
     ) -> str:
         if not _memory_manager or not hasattr(_memory_manager, "recall"):
             return "Memory system not available"
+
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
         try:
             k = max(1, int(k))
@@ -257,19 +308,27 @@ class ProfileViewTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "entity_id": {"type": "string", "description": "实体ID"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
                 "description": "实体类型: user, group, channel",
                 "enum": ["user", "group", "channel"],
             },
         },
-        "required": ["entity_id"],
+        "required": [],
     }
 
-    async def execute(self, entity_id: str, entity_type: str = "user") -> str:
+    async def execute(self, entity_id: str = "", entity_type: str = "user") -> str:
         if not _memory_manager or not hasattr(_memory_manager, "profile_store"):
             return "Profile system not available"
+
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
         return await _memory_manager.profile_store.get_profile_prompt(
             entity_id, entity_type
@@ -282,7 +341,10 @@ class ProfileUpdateTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "entity_id": {"type": "string", "description": "实体ID"},
+            "entity_id": {
+                "type": "string",
+                "description": "实体ID（可省略，系统自动推断为当前用户）",
+            },
             "entity_type": {
                 "type": "string",
                 "description": "实体类型",
@@ -305,19 +367,24 @@ class ProfileUpdateTool(BaseTool):
                 "description": "关系目标（action=set_relationship 时必填）",
             },
         },
-        "required": ["entity_id", "action", "value"],
+        "required": ["action", "value"],
     }
 
     async def execute(
         self,
-        entity_id: str,
         action: str,
         value: str,
+        entity_id: str = "",
         entity_type: str = "user",
         target: str = "",
     ) -> str:
         if not _memory_manager or not hasattr(_memory_manager, "profile_store"):
             return "Profile system not available"
+
+        # Auto-resolve entity from event context if not provided
+        if not entity_id and self._event_context:
+            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+            logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
         store = _memory_manager.profile_store
 

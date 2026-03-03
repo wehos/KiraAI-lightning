@@ -175,7 +175,7 @@ class DefaultPlugin(BasePlugin):
             f"[系统通知] 已进入停机模式\n"
             f"原因：{reason}\n"
             f"停机期间只接受管理员私聊，群聊消息会被缓存。\n"
-            f"私聊我说"恢复"或"开机"即可恢复。"
+            f'私聊我说"恢复"或"开机"即可恢复。'
         )
         chain = MessageChain([Text(content)])
         for user_id in self._authorized_users:
