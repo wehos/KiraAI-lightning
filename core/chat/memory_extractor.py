@@ -54,17 +54,23 @@ class MemoryExtractor:
         if not self._llm_client:
             return []
 
-        prompt = f"""分析以下对话片段，提取关于用户的关键事实。忽略寒暄和无意义内容。
+        prompt = f"""分析以下对话片段，提取关键事实。忽略寒暄和无意义内容。
+对话中每位用户的格式为 "昵称(ID): 内容"，请注意区分不同用户。
+
+你需要**同时**提取两类事实：
+1. **个人事实**：关于某位用户的偏好、身份、经历、观点等（subject = 用户昵称, speaker_id = 用户ID）
+2. **群组事实**：关于群聊整体的信息，如群氛围、常见话题、群规等（subject = "group", speaker_id = ""）
 
 对话:
 {conversation_text}
 
 请以 JSON 数组格式输出，每条事实包含：
-- "subject": 主语（"user" 或具体人名）
-- "content": 事实描述
+- "speaker_id": 该事实所属用户的 ID（从对话中括号内提取，如 "12345"；如果是群组级信息则留空 ""）
+- "subject": 主语（具体用户昵称，或 "group" 表示群组级信息）
+- "content": 事实描述。**必须包含主语**，写成完整的陈述句，让人脱离上下文也能看懂是关于谁的。例如：✅ "小明是一名医生" ✅ "该群经常讨论编程话题" ❌ "是一名医生"（缺少主语，不知道在说谁）
 - "importance": 重要性评分(1-10)
 - "tags": 相关标签数组
-- "semantic_id": 一个简短的 snake_case 语义标识符，用作文件名（如 "hates_css", "loves_python", "pet_cat_xiaoju"）
+- "semantic_id": 一个简短的 snake_case 语义标识符，用作文件名（如 "xiaoming_is_doctor", "group_discusses_programming"）
 
 只输出 JSON 数组，不要有其他内容。如果没有值得记录的事实，输出空数组 []。"""
 

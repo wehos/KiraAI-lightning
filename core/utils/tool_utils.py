@@ -4,11 +4,15 @@ from typing import Dict, Any
 
 class BaseTool(ABC):
     def __init__(self, *args, **kwargs):
-        pass
+        self._event_context = None
 
     name = None
     description = None
     parameters = None
+
+    def set_event_context(self, event):
+        """由 tool_manager wrapper 注入当前会话的 event 上下文"""
+        self._event_context = event
 
     @abstractmethod
     async def execute(self, *args, **kwargs) -> str:

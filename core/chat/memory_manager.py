@@ -83,6 +83,16 @@ class MemoryManager:
 
         logger.info("MemoryManager initialized (dual-brain, JSON-based architecture)")
 
+    async def async_init(self):
+        """异步初始化：从 TOML 文件重建 SQLite 索引，确保一致性
+
+        在 lifecycle.py 中创建 MemoryManager 后调用。
+        TOML 文件是真相源（用户可直接编辑），SQLite 是运行时索引。
+        每次启动全量 rebuild，保证两者一致。
+        """
+        await self.tree_store.rebuild_index()
+        logger.info("Memory index rebuilt from TOML files (startup sync)")
+
     def set_llm_client(self, llm_client):
         """延迟设置 LLM 客户端"""
         self._llm_client = llm_client
@@ -349,39 +359,148 @@ class MemoryManager:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
+    @staticmethod
+    def _extract_sender_map(chunks: list) -> dict[str, str]:
+        """从 chunk 元数据中程序化提取 sender 映射
+
+        Returns:
+            {nickname_lower: sender_id, ...}  和  {sender_id: sender_id, ...}
+            双向映射，方便用 subject 或 speaker_id 匹配
+        """
+        sender_map: dict[str, str] = {}
+        for chunk in chunks:
+            for msg in chunk:
+                if msg.get("role") != "user":
+                    continue
+                sid = msg.get("sender_id", "")
+                name = msg.get("sender_name", "")
+                if sid:
+                    sender_map[sid] = sid  # ID → ID（精确匹配）
+                    if name:
+                        sender_map[name.lower()] = sid  # 昵称 → ID
+        return sender_map
+
+    @staticmethod
+    def _get_unique_senders(chunks: list) -> list[str]:
+        """获取 chunks 中所有不重复的 sender_id"""
+        seen = set()
+        result = []
+        for chunk in chunks:
+            for msg in chunk:
+                if msg.get("role") != "user":
+                    continue
+                sid = msg.get("sender_id", "")
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    result.append(sid)
+        return result
+
+    def _resolve_fact_entity(
+        self,
+        fact: dict,
+        adapter: str,
+        sender_map: dict[str, str],
+        unique_senders: list[str],
+        session_entity_id: str,
+        session_entity_type: str,
+    ) -> tuple[str, str]:
+        """程序化路由：决定一条 fact 应该存到哪个 entity
+
+        路由优先级：
+        1. LLM 给出的 speaker_id 在 sender_map 中 → 存到该用户
+        2. LLM 给出的 subject 匹配 sender_map 中的昵称 → 存到该用户
+        3. subject 明确为 "group" → 存到群组 entity
+        4. 只有一个 sender（最常见情况）→ 所有非 group 事实都归该用户
+        5. 兜底 → 存到 session entity（私聊=用户，群聊=群组）
+        """
+        speaker_id = fact.get("speaker_id", "").strip()
+        subject = (fact.get("subject", "") or "").strip()
+
+        # 1. LLM 输出了 speaker_id，且在 chunk 元数据中能找到
+        if speaker_id and speaker_id in sender_map:
+            return f"{adapter}:{sender_map[speaker_id]}", ENTITY_USER
+
+        # 2. LLM 输出的 subject 匹配 chunk 中某个用户昵称
+        if subject and subject.lower() in sender_map:
+            matched_id = sender_map[subject.lower()]
+            return f"{adapter}:{matched_id}", ENTITY_USER
+
+        # 3. 明确的群组级信息
+        if subject.lower() == "group":
+            return session_entity_id, ENTITY_GROUP
+
+        # 4. 如果整个对话只有一个 sender，所有个人事实都归这个人
+        if len(unique_senders) == 1:
+            return f"{adapter}:{unique_senders[0]}", ENTITY_USER
+
+        # 5. 兜底：多人对话且无法匹配，存到 session entity
+        return session_entity_id, session_entity_type
+
     async def _hippocampus_process(self, session: str, chunks: list):
-        """海马体后台处理：提取事实 → 去重存储 → 升维反思 → 更新画像"""
+        """海马体后台处理：提取事实 → 程序化路由到正确 entity → 去重存储 → 升维反思 → 更新画像"""
         if not self._llm_client:
             logger.debug("LLM client not set, skipping hippocampus processing")
             return
 
         try:
-            # 1. 提取事实
+            # 1. 程序化提取 sender 映射（不依赖 LLM）
+            sender_map = self._extract_sender_map(chunks)
+            unique_senders = self._get_unique_senders(chunks)
+            logger.debug(f"Hippocampus sender_map: {sender_map}, unique_senders: {unique_senders}")
+
+            # 2. 提取事实（LLM）
             conversation_text = self._chunks_to_text(chunks)
             facts = await self.extractor.extract_facts(conversation_text)
 
             if not facts:
                 return
 
-            # 2. 解析实体信息
-            entity_id, entity_type = self._parse_entity_from_session(session)
+            # 3. 解析 session 级别的 entity（用于群组级事实和兜底）
+            session_entity_id, session_entity_type = self._parse_entity_from_session(session)
+            adapter = session.split(":", maxsplit=1)[0]
 
-            # 3. 去重 & 存储（铁律 #1）
+            # 4. 程序化路由每条事实 → 去重存储（铁律 #1）
+            routed_entities = set()
             for fact in facts:
+                entity_id, entity_type = self._resolve_fact_entity(
+                    fact, adapter, sender_map, unique_senders,
+                    session_entity_id, session_entity_type,
+                )
+
+                # 存到 group 的事实：确保 content 带主语，脱离上下文也看得懂是关于谁
+                # 存到 user 的事实：不需要，因为目录本身就标识了用户
+                if entity_type == ENTITY_GROUP:
+                    subject = (fact.get("subject", "") or "").strip()
+                    content = fact.get("content", "").strip()
+                    if content and subject and subject.lower() != "group":
+                        if not content.startswith(subject):
+                            fact["content"] = f"{subject}{content}"
+
+                logger.debug(
+                    f"Fact routed: '{fact.get('content', '')[:40]}...' → {entity_type}:{entity_id}"
+                )
                 await self.extractor.deduplicate_and_store(
                     fact, entity_id, entity_type
                 )
+                routed_entities.add((entity_id, entity_type))
 
-            # 4. 检查升维触发（铁律 #2）
-            if await self.extractor.check_elevation_trigger(entity_id, entity_type):
-                await self.extractor.generate_reflections(entity_id, entity_type)
+            # 5. 检查升维触发（铁律 #2）— 对所有涉及的 entity 检查
+            for eid, etype in routed_entities:
+                if await self.extractor.check_elevation_trigger(eid, etype):
+                    await self.extractor.generate_reflections(eid, etype)
 
-            # 5. 更新画像（铁律 #3 — 优先级分层）
-            await self._update_profile_from_facts(entity_id, entity_type, facts)
+            # 6. 更新画像（铁律 #3 — 按路由后的 entity 分组更新）
+            for fact in facts:
+                entity_id, entity_type = self._resolve_fact_entity(
+                    fact, adapter, sender_map, unique_senders,
+                    session_entity_id, session_entity_type,
+                )
+                if entity_type == ENTITY_USER:
+                    await self._update_profile_from_facts(entity_id, entity_type, [fact])
 
-            logger.info(f"Hippocampus completed for session {session}")
+            logger.info(f"Hippocampus completed for session {session}: {len(facts)} facts, senders={unique_senders}")
         except Exception as e:
-            logger.error(f"Hippocampus processing error: {e}")
+            logger.error(f"Hippocampus processing error: {e}", exc_info=True)
 
     async def _update_profile_from_facts(
         self, entity_id: str, entity_type: str, facts: list[dict]
@@ -428,7 +547,10 @@ class MemoryManager:
                 role = msg.get("role", "unknown")
                 content = msg.get("content", "")
                 if role == "user":
-                    lines.append(f"User: {content}")
+                    sender_name = msg.get("sender_name", "User")
+                    sender_id = msg.get("sender_id", "")
+                    label = f"{sender_name}({sender_id})" if sender_id else "User"
+                    lines.append(f"{label}: {content}")
                 elif role == "assistant":
                     lines.append(f"Bot: {content}")
         return "\n".join(lines)

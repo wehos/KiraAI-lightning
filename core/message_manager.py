@@ -156,8 +156,14 @@ class MessageProcessor:
         await self.handle_im_batch_message(batch_msg)
         return True
 
-    async def message_format_to_text(self, message_list: list[BaseMessageElement]):
-        """将平台使用标准消息格式封装的消息转换为LLM可以接收的字符串"""
+    async def message_format_to_text(self, message_list: list[BaseMessageElement], collect_images: list = None):
+        """将平台使用标准消息格式封装的消息转换为LLM可以接收的字符串
+
+        Args:
+            message_list: 消息元素列表
+            collect_images: 如果传入一个 list，图片 base64 会追加到其中（供 VL 模型直接使用）
+                            如果为 None，图片会退回 VLM 描述模式（兼容旧逻辑）
+        """
         message_str = ""
         for ele in message_list:
             if isinstance(ele, Text):
@@ -170,13 +176,37 @@ class MessageProcessor:
                 else:
                     message_str += f"[At {ele.pid}]"
             elif isinstance(ele, Image):
-                img_desc = await self.llm_api.desc_img(ele.url)
-                message_str += f"[Image {img_desc}]"
+                if collect_images is not None:
+                    # VL 模型直接看图模式：收集 base64，文本中只放占位符
+                    try:
+                        b64_data = await image_to_base64(ele.url)
+                        if b64_data:
+                            collect_images.append(b64_data)
+                            message_str += "[图片]"
+                        else:
+                            message_str += "[图片加载失败]"
+                    except Exception as e:
+                        logger.warning(f"Image base64 conversion failed: {e}")
+                        message_str += "[图片加载失败]"
+                else:
+                    # 退回 VLM 描述模式
+                    img_desc = await self.llm_api.desc_img(ele.url)
+                    message_str += f"[Image {img_desc}]"
             elif isinstance(ele, Sticker):
-                sticker_desc = await self.llm_api.desc_img(
-                    ele.sticker_bs64, is_base64=True
-                )
-                message_str += f"[Sticker {sticker_desc}]"
+                if collect_images is not None:
+                    try:
+                        if ele.sticker_bs64:
+                            collect_images.append(ele.sticker_bs64)
+                            message_str += "[表情包]"
+                        else:
+                            message_str += "[表情包加载失败]"
+                    except Exception:
+                        message_str += "[表情包加载失败]"
+                else:
+                    sticker_desc = await self.llm_api.desc_img(
+                        ele.sticker_bs64, is_base64=True
+                    )
+                    message_str += f"[Sticker {sticker_desc}]"
             elif isinstance(ele, Reply):
                 if ele.chain:
                     ele.chain.message_list = [
@@ -301,7 +331,13 @@ class MessageProcessor:
         # Start processing
         sid = event.session.sid
         try:
-            await self._handle_im_batch_message_inner(event)
+            # 超时保护：防止 LLM 调用或工具执行 hang 住导致整个 session 卡死
+            await asyncio.wait_for(
+                self._handle_im_batch_message_inner(event),
+                timeout=120.0,  # 2 分钟超时
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ handle_im_batch_message timed out for {sid} (120s)")
         except Exception as e:
             logger.error(f"❌ handle_im_batch_message crashed for {sid}: {e}", exc_info=True)
 
@@ -310,8 +346,10 @@ class MessageProcessor:
 
         for i, message in enumerate(event.messages):
             message_list = message.chain
-            message_str = await self.message_format_to_text(message_list)
+            image_parts = []
+            message_str = await self.message_format_to_text(message_list, collect_images=image_parts)
             message.message_str = message_str
+            message.image_data = image_parts
 
         # EventType.ON_IM_BATCH_MESSAGE
         im_batch_handlers = event_handler_reg.get_handlers(
@@ -350,40 +388,40 @@ class MessageProcessor:
 
         # 构建用户标识（跨 recall / profile 复用）
         user_key = f"{event.adapter.name}:{event.messages[-1].sender.user_id}"
+        # 用户消息文本，用于 RAG recall 查询
+        query_text = " ".join(m.message_str for m in event.messages if m.message_str)
 
         # Recall long-term memories (RAG)
         recalled_memories_str = ""
-        # try:
-        #     recalled = await self.memory_manager.recall(user_prompt, user_id=user_key, k=5)
-        #
-        #     # 群聊场景：额外搜索群级记忆（海马体在群聊中提取的事实存储在群 ID 下）
-        #     if event.is_group_message():
-        #         group_key = f"{event.adapter.name}:group:{event.session.session_id}"
-        #         group_recalled = await self.memory_manager.recall(
-        #             user_prompt, user_id=group_key, k=3
-        #         )
-        #         # 去重后合并
-        #         existing_ids = {m.id for m in recalled}
-        #         for gm in group_recalled:
-        #             if gm.id not in existing_ids:
-        #                 recalled.append(gm)
-        #
-        #     recalled_memories_str = self.memory_manager.format_recalled_memories(recalled)
-        # except Exception:
-        #     logger.error("Long-term memory recall failed")
+        try:
+            recalled = await self.memory_manager.recall(
+                query_text, entity_id=user_key, entity_type="user", k=5
+            )
+
+            # 群聊场景：额外搜索群级记忆（海马体在群聊中提取的事实存储在群 ID 下）
+            if event.is_group_message():
+                group_key = f"{event.adapter.name}:{event.session.session_id}"
+                group_recalled = await self.memory_manager.recall(
+                    query_text, entity_id=group_key, entity_type="group", k=3
+                )
+                # 去重后合并
+                existing_ids = {m.id for m in recalled}
+                for gm in group_recalled:
+                    if gm.id not in existing_ids:
+                        recalled.append(gm)
+
+            recalled_memories_str = self.memory_manager.format_recalled_memories(recalled)
+        except Exception as e:
+            logger.error(f"Long-term memory recall failed: {e}", exc_info=True)
 
         # Get user profile
         user_profile_str = ""
-        # try:
-        #     user_profile_str = self.memory_manager.get_user_profile_prompt(user_key)
-        #     # Update interaction stats
-        #     await self.memory_manager.update_user_interaction(
-        #         user_key,
-        #         platform=event.adapter.platform,
-        #         nickname=event.messages[-1].sender.nickname
-        #     )
-        # except Exception:
-        #     logger.error("User profile retrieval skipped")
+        try:
+            user_profile_str = await self.memory_manager.get_profile_prompt(
+                user_key, "user"
+            )
+        except Exception as e:
+            logger.error(f"User profile retrieval failed: {e}", exc_info=True)
 
         # Get emoji_dict
         emoji_dict = getattr(get_adapter_by_name(event.adapter.name), "emoji_dict", {})
@@ -419,11 +457,17 @@ class MessageProcessor:
         )
         request.system_prompt.extend(agent_prompt_list)
 
-        # Add received im messages
+        # Add received im messages + collect image data for VL
+        all_image_data = []
         for i, message in enumerate(event.messages):
             request.user_prompt.append(
                 Prompt(message.message_str, name="message", source="system")
             )
+            if hasattr(message, "image_data") and message.image_data:
+                all_image_data.extend(message.image_data)
+
+        # 暂存图片数据，assemble_prompt 后注入 multimodal content
+        request._image_data = all_image_data
 
         # EventType.ON_LLM_REQUEST
         llm_handlers = event_handler_reg.get_handlers(
@@ -438,14 +482,44 @@ class MessageProcessor:
         # Assemble messages
         request.assemble_prompt()
 
+        # 如果有图片，将最后一条 user message 的 content 改为 multimodal 格式
+        # OpenAI/Gemini API 都支持 content: [{type: "text", ...}, {type: "image_url", ...}]
+        image_data = getattr(request, "_image_data", [])
+        if image_data and request.messages:
+            # 找到最后一条 user message
+            for i in range(len(request.messages) - 1, -1, -1):
+                if request.messages[i].get("role") == "user":
+                    text_content = request.messages[i]["content"]
+                    multimodal_content = [{"type": "text", "text": text_content}]
+                    for b64 in image_data:
+                        multimodal_content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64}",
+                                "detail": "high"
+                            }
+                        })
+                    request.messages[i]["content"] = multimodal_content
+                    logger.info(f"Injected {len(image_data)} image(s) into user message for VL model")
+                    break
+
         # Print user message info
         user_message = "".join(
             p.content for p in request.user_prompt if isinstance(p, Prompt)
         )
         logger.info(f"processing message(s) from {sid}:\n{user_message}")
 
-        # 把收到的消息放到新收到的消息内容中
-        new_memory_chunk.append(request.messages[-1])
+        # 把收到的消息放到新收到的消息内容中，附加 sender 信息供海马体使用
+        # 群聊 batch 可能包含多位发言者的消息，逐条保留 sender 信息
+        adapter_name = event.adapter.name
+        for msg in event.messages:
+            new_memory_chunk.append({
+                "role": "user",
+                "content": msg.message_str,
+                "sender_id": msg.sender.user_id,
+                "sender_name": msg.sender.nickname or "User",
+                "adapter": adapter_name,
+            })
 
         provider_name = llm_model.model.provider_name
         model_id = llm_model.model.model_id
@@ -489,34 +563,30 @@ class MessageProcessor:
                         logger.info("Event stopped")
                         return
 
+                # 初始化 response_with_ids，避免后续引用未定义变量
+                response_with_ids = ""
+
                 if not llm_resp.tool_calls:
-                    session_lock = self.get_session_lock(sid)
-                    async with session_lock:
-                        message_ids = await self.send_xml_messages(
-                            sid, llm_resp.text_response.strip()
-                        )
-                        response_with_ids = self._add_message_ids(
-                            llm_resp.text_response, message_ids
-                        )
-                        logger.info(f"LLM: {response_with_ids}")
+                    # 纯文本回复
+                    if llm_resp.text_response:
+                        session_lock = self.get_session_lock(sid)
+                        async with session_lock:
+                            message_ids = await self.send_xml_messages(
+                                sid, llm_resp.text_response.strip()
+                            )
+                            response_with_ids = self._add_message_ids(
+                                llm_resp.text_response, message_ids
+                            )
+                            logger.info(f"LLM: {response_with_ids}")
                     request.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response_with_ids
-                            if llm_resp.text_response
-                            else "",
-                        }
+                        {"role": "assistant", "content": response_with_ids}
                     )
                     append_msg(
-                        {
-                            "role": "assistant",
-                            "content": response_with_ids
-                            if llm_resp.text_response
-                            else "",
-                        }
+                        {"role": "assistant", "content": response_with_ids}
                     )
                     break
                 else:
+                    # 工具调用（可能同时带文本回复）
                     if llm_resp.text_response:
                         session_lock = self.get_session_lock(sid)
                         async with session_lock:
@@ -531,18 +601,14 @@ class MessageProcessor:
                     request.messages.append(
                         {
                             "role": "assistant",
-                            "content": response_with_ids
-                            if llm_resp.text_response
-                            else "",
+                            "content": response_with_ids,
                             "tool_calls": llm_resp.tool_calls,
                         }
                     )
                     append_msg(
                         {
                             "role": "assistant",
-                            "content": response_with_ids
-                            if llm_resp.text_response
-                            else "",
+                            "content": response_with_ids,
                             "tool_calls": llm_resp.tool_calls,
                         }
                     )

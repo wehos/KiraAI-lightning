@@ -143,7 +143,13 @@ async def register_all_tools(llm_api) -> None:
 
             def _make_func(tool):
                 async def _wrapped(*args, **kwargs):
-                    return await tool.execute(*args, **kwargs)
+                    # llm_client.execute_tool() passes event as first positional arg
+                    event = args[0] if args else None
+                    remaining_args = args[1:] if len(args) > 1 else ()
+                    # Inject event context into tool for entity resolution
+                    if event and hasattr(tool, "set_event_context"):
+                        tool.set_event_context(event)
+                    return await tool.execute(*remaining_args, **kwargs)
 
                 return _wrapped
 

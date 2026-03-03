@@ -1,0 +1,8 @@
+{
+    "display_name": "Welcome New Members",
+    "plugin_id": "kira_welcome_plugin",
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "Automatically greet new members when they join a group chat",
+    "repo": null
+}

@@ -41,6 +41,8 @@ class KiraIMMessage:
     extra: Optional[dict] = None
     message_str: Optional[str] = field(default=None, init=False)
     message_repr: Optional[str] = field(default=None, init=False)
+    # 图片 base64 数据列表，供 VL 模型直接读取（不再走两轮描述）
+    image_data: list = field(default_factory=list, init=False)
 
     def is_group_message(self):
         return self.group is not None

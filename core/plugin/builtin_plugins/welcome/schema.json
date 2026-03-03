@@ -1,0 +1,14 @@
+{
+  "enabled_groups": {
+    "name": "启用欢迎的群",
+    "type": "list",
+    "default": [],
+    "hint": "留空则对所有群启用；填入群号则只对指定群启用"
+  },
+  "welcome_image": {
+    "name": "欢迎图片",
+    "type": "string",
+    "default": "",
+    "hint": "新人进群时在问候语后附带的固定图片，支持本地路径或URL。留空则不发图片"
+  }
+}

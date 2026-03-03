@@ -1,0 +1,8 @@
+{
+    "display_name": "Shutdown Control",
+    "plugin_id": "kira_shutdown_plugin",
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "Allow authorized users to shutdown/startup the bot (e.g. during live streaming). Caches unread messages during shutdown.",
+    "repo": null
+}

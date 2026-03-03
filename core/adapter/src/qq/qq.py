@@ -363,7 +363,14 @@ class QQAdapter(IMAdapter):
         should_respond = False
         is_mentioned = False
 
-        for m in msg.get("message", {}):
+        # 先拼出完整纯文本，供关键词匹配用
+        full_text = "".join(
+            (m.get("data") or {}).get("text", "")
+            for m in msg.get("message", [])
+            if m.get("type") == "text"
+        )
+
+        for m in msg.get("message", []):
             if m.get("type") == "at" and (
                     m.get("data", {}).get("qq", "") == str(msg.get("self_id")) or m.get("data", {}).get("qq", "") == "all"):
                 should_respond = True
@@ -375,17 +382,20 @@ class QQAdapter(IMAdapter):
                     should_respond = True
                     is_mentioned = True
                     break
-            elif m.get("type") == "text":
-                message_text = (m.get("data") or {}).get("text", "")
-                waking_keywords_config = self.config.get("waking_keywords", [])
-                if waking_keywords_config:
-                    if isinstance(waking_keywords_config, str):
-                        waking_keywords = [kw.strip() for kw in self.config.get("waking_keywords", "").split(",")]
-                    else:
-                        waking_keywords = waking_keywords_config
-                    if any(kw in message_text for kw in waking_keywords):
-                        should_respond = True
-                        break
+
+        # 关键词唤醒：用完整文本匹配，不受 segment 分割影响
+        if not is_mentioned:
+            waking_keywords_config = self.config.get("waking_keywords", [])
+            if waking_keywords_config:
+                if isinstance(waking_keywords_config, str):
+                    waking_keywords = [kw.strip() for kw in waking_keywords_config.split(",")]
+                else:
+                    waking_keywords = [str(kw).strip() for kw in waking_keywords_config]
+                waking_keywords = [kw for kw in waking_keywords if kw]  # 过滤空串
+                if waking_keywords and any(kw in full_text for kw in waking_keywords):
+                    should_respond = True
+                    is_mentioned = True
+                    logger.info(f"[Keyword Wake] matched in: '{full_text[:50]}', keywords={waking_keywords}")
 
         # should_respond = True
 

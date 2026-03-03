@@ -122,6 +122,7 @@ class KiraLifecycle:
         self.memory_manager = MemoryManager(
             self.kira_config, llm_client=self.llm_api
         )
+        await self.memory_manager.async_init()
 
         # Inject memory_manager into memory tools
         try:
