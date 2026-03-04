@@ -35,11 +35,17 @@ class DefaultPlugin(BasePlugin):
         super().__init__(ctx, cfg)
         cfg_users = cfg.get("authorized_users", [])
         self._authorized_users = HARDCODED_AUTHORIZED_USERS | set(str(u) for u in cfg_users)
+        # 特别关注群：停机期间仍可回复
+        cfg_vip = cfg.get("vip_groups", [])
+        self._vip_groups: set[str] = set(str(g) for g in cfg_vip)
         self._cached_messages: dict[str, list[tuple[KiraMessageEvent, float]]] = {}
         self._decay_half_life = 600  # 10分钟半衰期
 
     async def initialize(self):
-        logger.info(f"[Shutdown Plugin] enabled, authorized users: {self._authorized_users}")
+        logger.info(
+            f"[Shutdown Plugin] enabled, authorized users: {self._authorized_users}, "
+            f"vip groups: {self._vip_groups}"
+        )
 
     async def terminate(self):
         pass
@@ -150,11 +156,19 @@ class DefaultPlugin(BasePlugin):
 
         sender_id = event.message.sender.user_id
         is_dm = not event.is_group_message()
+        is_group = event.is_group_message()
         is_authorized = str(sender_id) in self._authorized_users
 
         # 授权用户的私聊 → 放行
         if is_dm and is_authorized:
             return
+
+        # 特别关注群 → 放行（停机期间仍正常回复）
+        if is_group and self._vip_groups:
+            group_id = str(event.message.group.group_id)
+            if group_id in self._vip_groups:
+                logger.debug(f"[Shutdown] VIP group {group_id} message allowed through")
+                return
 
         # 其他所有消息 → 缓存并丢弃
         sid = event.session.sid
@@ -171,10 +185,13 @@ class DefaultPlugin(BasePlugin):
         """停机后给所有授权用户发私聊通知"""
         await asyncio.sleep(1)  # 等停机回复先发出
         msg_processor = self.ctx.message_processor
+        vip_hint = ""
+        if self._vip_groups:
+            vip_hint = f"\n特别关注群 {self._vip_groups} 不受影响，仍会正常回复。"
         content = (
             f"[系统通知] 已进入停机模式\n"
             f"原因：{reason}\n"
-            f"停机期间只接受管理员私聊，群聊消息会被缓存。\n"
+            f"停机期间只接受管理员私聊，群聊消息会被缓存。{vip_hint}\n"
             f'私聊我说"恢复"或"开机"即可恢复。'
         )
         chain = MessageChain([Text(content)])

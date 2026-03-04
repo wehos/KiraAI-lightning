@@ -20,13 +20,13 @@
   "session_fatigue_rate": {
     "name": "会话疲劳增速",
     "type": "number",
-    "default": 2.0,
+    "default": 5.0,
     "hint": "每处理一条消息增加的疲劳值（0-10）"
   },
   "session_fatigue_cap": {
     "name": "会话疲劳上限",
     "type": "number",
-    "default": 40,
+    "default": 50,
     "hint": "单次唤醒周期内会话疲劳的最大贡献值"
   },
   "global_window_minutes": {
@@ -38,19 +38,19 @@
   "global_fatigue_per_msg": {
     "name": "全局每消息疲劳",
     "type": "number",
-    "default": 0.3,
+    "default": 0.8,
     "hint": "全局窗口内每条消息贡献的疲劳值"
   },
   "global_fatigue_cap": {
     "name": "全局疲劳上限",
     "type": "number",
-    "default": 30,
+    "default": 40,
     "hint": "全局负荷疲劳的最大贡献值"
   },
   "recovery_rate": {
     "name": "疲劳恢复速度",
     "type": "number",
-    "default": 5.0,
+    "default": 3.0,
     "hint": "每分钟空闲恢复的疲劳值"
   }
 }
