@@ -846,7 +846,9 @@ class MemoryIndex:
 
         # 清理 FTS5 特殊字符
         cleaned = text.strip()
-        for ch in ['"', "'", "(", ")", "*", "+", "-", ":", "^", "{", "}", "~"]:
+        for ch in ['"', "'", "(", ")", "*", "+", "-", ":", "^", "{", "}", "~",
+                   "[", "]", "@", "<", ">", "/", "\\", "|", "!", "?", "#", "&",
+                   "=", ";", ",", "."]:
             cleaned = cleaned.replace(ch, " ")
         cleaned = cleaned.strip()
         if not cleaned:
