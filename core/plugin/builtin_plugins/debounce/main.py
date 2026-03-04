@@ -47,10 +47,23 @@ class DefaultPlugin(BasePlugin):
         self._idle_tasks: dict[str, asyncio.Task] = {}
 
     async def initialize(self):
+        # 尝试获取 fatigue 插件实例（可能尚未加载，延迟获取）
+        self._fatigue_plugin = None
         logger.info(
             f"[Debounce Plugin] enabled, idle_timeout={self.idle_timeout}s, "
             f"waking_users={self._waking_users}"
         )
+
+    def _get_fatigue_plugin(self):
+        """延迟获取 fatigue 插件实例"""
+        if self._fatigue_plugin is None:
+            try:
+                self._fatigue_plugin = self.ctx.plugin_mgr.get_plugin_inst(
+                    "kira_fatigue_plugin"
+                )
+            except Exception:
+                pass
+        return self._fatigue_plugin
 
     async def terminate(self):
         for task in self._idle_tasks.values():
@@ -86,6 +99,22 @@ class DefaultPlugin(BasePlugin):
             if not is_direct_trigger and not is_waking_user:
                 event.stop()
                 return
+
+            # 疲劳影响唤醒：高疲劳时，waking_user 的普通消息有概率不唤醒
+            # @/引用/关键词 始终能唤醒（不受疲劳影响）
+            if not is_direct_trigger and is_waking_user:
+                fatigue_plugin = self._get_fatigue_plugin()
+                if fatigue_plugin is not None:
+                    fatigue = fatigue_plugin.get_fatigue(sid)
+                    # 疲劳 > 70 时，waking_user 也无法唤醒（除非 @）
+                    if fatigue > 70:
+                        logger.info(
+                            f"[Wake blocked] Session {sid} too tired "
+                            f"(fatigue={fatigue:.0f}), ignoring waking_user {sender_id}"
+                        )
+                        event.stop()
+                        return
+
             # WAKE UP
             self._awake_sessions[sid] = time.time()
             logger.info(
@@ -150,15 +179,27 @@ class DefaultPlugin(BasePlugin):
         self._idle_tasks[sid] = asyncio.create_task(self._idle_sleep(sid))
 
     async def _idle_sleep(self, sid: str):
-        """空闲超时 → 休眠，flush 剩余 buffer"""
+        """空闲超时 → 休眠，flush 剩余 buffer。疲劳高时更快休眠。"""
+        # 疲劳影响休眠速度：疲劳越高，idle_timeout 越短
+        effective_timeout = self.idle_timeout
+        fatigue_plugin = self._get_fatigue_plugin()
+        if fatigue_plugin is not None:
+            fatigue = fatigue_plugin.get_fatigue(sid)
+            # 疲劳 0 → 原始 timeout；疲劳 100 → timeout * 0.3
+            scale = 1.0 - 0.7 * (fatigue / 100.0)
+            effective_timeout = self.idle_timeout * scale
+
         try:
-            await asyncio.sleep(self.idle_timeout)
+            await asyncio.sleep(effective_timeout)
         except asyncio.CancelledError:
             return
 
         # 超时 → 休眠
         self._awake_sessions.pop(sid, None)
-        logger.info(f"[Sleep] Session {sid} went to sleep (idle {self.idle_timeout}s)")
+        logger.info(
+            f"[Sleep] Session {sid} went to sleep "
+            f"(idle {effective_timeout:.1f}s, base={self.idle_timeout}s)"
+        )
 
         # flush 剩余缓冲
         buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)

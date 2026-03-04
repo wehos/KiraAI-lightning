@@ -1,0 +1,56 @@
+{
+  "enable_circadian": {
+    "name": "启用日内节律",
+    "type": "bool",
+    "default": true,
+    "hint": "模拟生物钟，深夜疲劳值升高，白天精力充沛"
+  },
+  "peak_hours": {
+    "name": "精力高峰时段",
+    "type": "string",
+    "default": "10-13,19-22",
+    "hint": "精力最充沛的时段（24小时制，逗号分隔多个区间）"
+  },
+  "low_hours": {
+    "name": "低谷时段",
+    "type": "string",
+    "default": "2-6",
+    "hint": "最疲劳的时段（24小时制）"
+  },
+  "session_fatigue_rate": {
+    "name": "会话疲劳增速",
+    "type": "number",
+    "default": 2.0,
+    "hint": "每处理一条消息增加的疲劳值（0-10）"
+  },
+  "session_fatigue_cap": {
+    "name": "会话疲劳上限",
+    "type": "number",
+    "default": 40,
+    "hint": "单次唤醒周期内会话疲劳的最大贡献值"
+  },
+  "global_window_minutes": {
+    "name": "全局统计窗口(分钟)",
+    "type": "number",
+    "default": 60,
+    "hint": "统计过去多少分钟内的总消息量来计算全局负荷"
+  },
+  "global_fatigue_per_msg": {
+    "name": "全局每消息疲劳",
+    "type": "number",
+    "default": 0.3,
+    "hint": "全局窗口内每条消息贡献的疲劳值"
+  },
+  "global_fatigue_cap": {
+    "name": "全局疲劳上限",
+    "type": "number",
+    "default": 30,
+    "hint": "全局负荷疲劳的最大贡献值"
+  },
+  "recovery_rate": {
+    "name": "疲劳恢复速度",
+    "type": "number",
+    "default": 5.0,
+    "hint": "每分钟空闲恢复的疲劳值"
+  }
+}

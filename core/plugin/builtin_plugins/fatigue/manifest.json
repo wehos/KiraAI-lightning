@@ -1,0 +1,8 @@
+{
+    "display_name": "Fatigue System",
+    "plugin_id": "kira_fatigue_plugin",
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "AI fatigue simulation - circadian rhythm, session load, and global load affect reply willingness and tone",
+    "repo": null
+}
