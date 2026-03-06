@@ -22,10 +22,6 @@ from core.plugin import BasePlugin, logger, on, Priority
 from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent
 
 
-# 默认唤醒用户（可被配置覆盖）
-DEFAULT_WAKING_USERS = {"341391975", "3095809660", "2924548617"}
-
-
 class DefaultPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -34,9 +30,9 @@ class DefaultPlugin(BasePlugin):
         self.max_buffer_messages = int(bot_cfg.get("max_buffer_messages", 3))
         self.idle_timeout = float(cfg.get("idle_timeout", 10.0))
 
-        # 唤醒用户列表
+        # 唤醒用户列表（完全由 schema.json + web-ui 配置控制，无硬编码）
         cfg_users = cfg.get("waking_users", [])
-        self._waking_users = DEFAULT_WAKING_USERS | set(str(u) for u in cfg_users)
+        self._waking_users = set(str(u) for u in cfg_users)
 
         # 去抖状态
         self.session_events: dict[str, asyncio.Event] = {}

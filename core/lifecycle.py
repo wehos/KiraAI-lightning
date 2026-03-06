@@ -124,13 +124,14 @@ class KiraLifecycle:
         )
         await self.memory_manager.async_init()
 
-        # Inject memory_manager into memory tools
+        # Inject memory_manager and llm_client into memory tools
         try:
-            from data.tools.memory import set_memory_manager
+            from data.tools.memory import set_memory_manager, set_llm_client
 
             set_memory_manager(self.memory_manager)
+            set_llm_client(self.llm_api)
         except (ImportError, ModuleNotFoundError, AttributeError) as e:
-            logger.warning(f"Failed to inject memory_manager into tools: {e}")
+            logger.warning(f"Failed to inject dependencies into memory tools: {e}")
 
         # ====== init persona manager ======
         self.persona_manager = PersonaManager()
