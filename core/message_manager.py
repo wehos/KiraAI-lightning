@@ -437,12 +437,22 @@ class MessageProcessor:
                 profile_parts = []
                 for sk in seen_senders:
                     try:
-                        p = await self.memory_manager.get_profile_prompt(sk, "user")
+                        profile = await self.memory_manager.get_profile(sk, "user")
+                        p = profile.to_prompt()
                         if p and p != "暂无画像信息":
-                            profile_parts.append(f"[{sk}]\n{p}")
+                            # 用昵称/名字标识，避免暴露系统 entity_id
+                            label = profile.name or profile.nickname or sk.split(":")[-1]
+                            profile_parts.append(f"【{label}】\n{p}")
                     except Exception:
                         pass
-                user_profile_str = "\n\n".join(profile_parts) if profile_parts else "暂无画像信息"
+                if profile_parts:
+                    user_profile_str = (
+                        "以下是本次群聊中参与对话的用户的画像信息，"
+                        "帮助你了解每个人的背景和偏好：\n\n"
+                        + "\n\n".join(profile_parts)
+                    )
+                else:
+                    user_profile_str = "暂无画像信息"
             else:
                 user_profile_str = await self.memory_manager.get_profile_prompt(
                     user_key, "user"

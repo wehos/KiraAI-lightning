@@ -631,6 +631,8 @@ class MemoryManager:
             entity_id = f"{adapter}:{sid}"
             try:
                 profile = await self.profile_store.get_profile(entity_id, ENTITY_USER)
+                # 用昵称/名字标识，避免暴露系统 entity_id
+                label = profile.name or profile.nickname or str(sid)
                 info = []
                 if profile.name:
                     info.append(f"名字: {profile.name}")
@@ -643,13 +645,17 @@ class MemoryManager:
                 if profile.facts:
                     info.append(f"已知事实: {'; '.join(profile.facts[:5])}")
                 if info:
-                    parts.append(f"[{entity_id}] {' | '.join(info)}")
+                    parts.append(f"【{label}】 {' | '.join(info)}")
             except Exception:
                 continue
 
         if not parts:
             return ""
-        return "## 参与者已知信息\n" + "\n".join(parts)
+        return (
+            "## 参与者已知信息（以下是对话中提到的用户的已有画像，"
+            "提取事实时请避免重复记录这些已有内容）\n"
+            + "\n".join(parts)
+        )
 
     @staticmethod
     def _chunks_to_text(chunks: list) -> str:

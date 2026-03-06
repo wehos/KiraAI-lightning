@@ -6,8 +6,8 @@
 支持 user / group / channel / global 四种实体域。
 
 entity_id 自动推断：
-当 LLM 未提供 entity_id 时，从 event context 自动推断。
-默认策略：关联到当前发言用户（即使在群聊中）。
+当 LLM 未提供 entity_id 时，用 fast_llm 从对话上下文自动提取涉及的 entity。
+对话上下文从 memory_manager 的 session_memory 自动获取，不依赖 LLM 传入。
 """
 
 import asyncio
@@ -34,6 +34,38 @@ def set_llm_client(client):
     """被外部调用以注入 LLMClient 引用（用于 fast_llm entity 提取）"""
     global _llm_client
     _llm_client = client
+
+
+def _get_conversation_context(event) -> str:
+    """从 memory_manager 的 session_memory 自动获取最近对话上下文。
+
+    不依赖 LLM 传入 context 参数，而是直接读取对话历史。
+    """
+    if not _memory_manager or not event:
+        return ""
+    try:
+        session = event.session
+        sid = f"{session.adapter_name}:{session.session_type}:{session.session_id}"
+        messages = _memory_manager.fetch_memory(sid)
+        if not messages:
+            return ""
+        # 取最近 10 条消息，拼接为上下文字符串
+        recent = messages[-10:]
+        parts = []
+        for msg in recent:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            sender = msg.get("sender_name", "")
+            if role == "user" and sender:
+                parts.append(f"{sender}: {content}")
+            elif role == "assistant":
+                parts.append(f"AI: {content}")
+            elif content:
+                parts.append(content)
+        return "\n".join(parts[-800:]) if parts else ""
+    except Exception as e:
+        logger.warning(f"Failed to get conversation context: {e}")
+        return ""
 
 
 def _resolve_entity_from_event(event) -> Tuple[str, str]:
@@ -117,15 +149,20 @@ async def _get_known_users_hint() -> str:
 
 
 async def _extract_entities_from_context(
-    query: str, context: str = ""
+    query: str, context: str = "", event=None
 ) -> list[str]:
     """用 fast_llm 从 query + 对话上下文中提取涉及的 entity 标识列表。
 
     返回昵称/QQ号列表，如 ["小明", "341391975"]。
     SELF 表示当前发言者自己，NONE 表示无法确定。
+    如果 context 为空，自动从 event 的 session_memory 获取。
     """
     if not _llm_client or not query:
         return []
+
+    # 自动获取对话上下文
+    if not context and event:
+        context = _get_conversation_context(event)
 
     known_hint = await _get_known_users_hint()
 
@@ -156,13 +193,14 @@ async def _extract_entities_from_context(
 
 
 async def _resolve_single_entity_from_context(
-    query: str, context: str, event=None
+    query: str, context: str = "", event=None
 ) -> Tuple[str, str]:
     """单 entity 解析：从上下文提取第一个 entity 并 resolve。
 
     提取失败或为 SELF 时回退到 event 的当前发言者。
+    context 为空时自动从 event 的 session_memory 获取。
     """
-    extracted = await _extract_entities_from_context(query, context)
+    extracted = await _extract_entities_from_context(query, context, event)
 
     if extracted:
         # 取第一个
@@ -185,13 +223,9 @@ class MemoryAddTool(BaseTool):
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "要记录的记忆文本"},
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解记忆涉及的人物。建议传入最近几轮对话。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从上下文推断。",
+                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
             },
             "entity_type": {
                 "type": "string",
@@ -219,7 +253,6 @@ class MemoryAddTool(BaseTool):
     async def execute(
         self,
         text: str,
-        context: str = "",
         entity_id: str = "",
         entity_type: str = "user",
         importance: int = 5,
@@ -234,9 +267,9 @@ class MemoryAddTool(BaseTool):
             entity_id, entity_type = await _resolve_entity_id_by_name(
                 entity_id, entity_type, self._event_context
             )
-        elif context and _llm_client:
+        elif _llm_client:
             entity_id, entity_type = await _resolve_single_entity_from_context(
-                text, context, self._event_context
+                text, "", self._event_context
             )
         elif self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
@@ -304,13 +337,9 @@ class MemoryUpdateTool(BaseTool):
         "properties": {
             "memory_id": {"type": "string", "description": "记忆ID"},
             "text": {"type": "string", "description": "更新后的记忆文本"},
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解涉及的人物。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从上下文推断。",
+                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
             },
             "entity_type": {
                 "type": "string",
@@ -333,7 +362,6 @@ class MemoryUpdateTool(BaseTool):
         self,
         memory_id: str,
         text: str,
-        context: str = "",
         entity_id: str = "",
         entity_type: str = "user",
         folder: str = "facts",
@@ -346,9 +374,9 @@ class MemoryUpdateTool(BaseTool):
             entity_id, entity_type = await _resolve_entity_id_by_name(
                 entity_id, entity_type, self._event_context
             )
-        elif context and _llm_client:
+        elif _llm_client:
             entity_id, entity_type = await _resolve_single_entity_from_context(
-                text, context, self._event_context
+                text, "", self._event_context
             )
         elif self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
@@ -382,13 +410,9 @@ class MemoryRemoveTool(BaseTool):
         "type": "object",
         "properties": {
             "memory_id": {"type": "string", "description": "记忆ID"},
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解涉及的人物。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从上下文推断。",
+                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
             },
             "entity_type": {
                 "type": "string",
@@ -406,7 +430,6 @@ class MemoryRemoveTool(BaseTool):
     async def execute(
         self,
         memory_id: str,
-        context: str = "",
         entity_id: str = "",
         entity_type: str = "user",
         folder: str = "facts",
@@ -438,13 +461,9 @@ class MemorySearchTool(BaseTool):
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "搜索查询文本"},
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解查询意图和涉及的人物。建议传入最近几轮对话。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从上下文推断涉及的用户（可能是多个）。",
+                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从对话上下文推断涉及的用户（可能是多个）。",
             },
             "entity_type": {
                 "type": "string",
@@ -479,7 +498,6 @@ class MemorySearchTool(BaseTool):
     async def execute(
         self,
         query: str,
-        context: str = "",
         entity_id: str = "",
         entity_type: str = "user",
         k: int = 5,
@@ -502,10 +520,12 @@ class MemorySearchTool(BaseTool):
             )
             return self._format_memories(memories) or "No relevant memories found"
 
-        # === 路径 2：没传 entity_id → fast_llm 从上下文提取 ===
+        # === 路径 2：没传 entity_id → fast_llm 从对话上下文自动提取 ===
         extracted = []
-        if context and _llm_client:
-            extracted = await _extract_entities_from_context(query, context)
+        if _llm_client:
+            extracted = await _extract_entities_from_context(
+                query, "", self._event_context
+            )
 
         if not extracted:
             # 提取失败 → 回退当前发言者
@@ -595,13 +615,9 @@ class ProfileViewTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解涉及的人物。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从上下文推断。",
+                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
             },
             "entity_type": {
                 "type": "string",
@@ -613,7 +629,7 @@ class ProfileViewTool(BaseTool):
     }
 
     async def execute(
-        self, context: str = "", entity_id: str = "", entity_type: str = "user"
+        self, entity_id: str = "", entity_type: str = "user"
     ) -> str:
         if not _memory_manager or not hasattr(_memory_manager, "profile_store"):
             return "Profile system not available"
@@ -622,9 +638,9 @@ class ProfileViewTool(BaseTool):
             entity_id, entity_type = await _resolve_entity_id_by_name(
                 entity_id, entity_type, self._event_context
             )
-        elif context and _llm_client:
+        elif _llm_client:
             entity_id, entity_type = await _resolve_single_entity_from_context(
-                "查看用户画像", context, self._event_context
+                "查看用户画像", "", self._event_context
             )
         elif self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
@@ -640,13 +656,9 @@ class ProfileUpdateTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "context": {
-                "type": "string",
-                "description": "相关的对话上下文片段，帮助系统理解涉及的人物。",
-            },
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从上下文推断。",
+                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
             },
             "entity_type": {
                 "type": "string",
@@ -677,7 +689,6 @@ class ProfileUpdateTool(BaseTool):
         self,
         action: str,
         value: str,
-        context: str = "",
         entity_id: str = "",
         entity_type: str = "user",
         target: str = "",
@@ -689,9 +700,9 @@ class ProfileUpdateTool(BaseTool):
             entity_id, entity_type = await _resolve_entity_id_by_name(
                 entity_id, entity_type, self._event_context
             )
-        elif context and _llm_client:
+        elif _llm_client:
             entity_id, entity_type = await _resolve_single_entity_from_context(
-                value, context, self._event_context
+                value, "", self._event_context
             )
         elif self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
