@@ -89,7 +89,7 @@ class MemoryAddTool(BaseTool):
             "text": {"type": "string", "description": "要记录的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",
@@ -200,7 +200,7 @@ class MemoryUpdateTool(BaseTool):
             "text": {"type": "string", "description": "更新后的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",
@@ -272,7 +272,7 @@ class MemoryRemoveTool(BaseTool):
             "memory_id": {"type": "string", "description": "记忆ID"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",
@@ -326,7 +326,7 @@ class MemorySearchTool(BaseTool):
             "query": {"type": "string", "description": "搜索查询文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",
@@ -391,7 +391,7 @@ class ProfileViewTool(BaseTool):
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",
@@ -429,7 +429,7 @@ class ProfileUpdateTool(BaseTool):
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
+                "description": "想要查询/操作的用户信息：可以是昵称或QQ号。省略则默认为当前发言用户。",
             },
             "entity_type": {
                 "type": "string",

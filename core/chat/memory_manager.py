@@ -312,12 +312,16 @@ class MemoryManager:
     async def update_user_interaction(
         self, user_id: str, platform: str = "", nickname: str = ""
     ):
-        """更新用户交互信息"""
+        """更新用户交互信息，同时维护 name/nickname 索引"""
         updates = {}
         if platform:
             updates["platform"] = platform
         if nickname:
             updates["nickname"] = nickname
+            # name 为空时用 nickname 自动补位，保证昵称索引可查
+            profile = await self.profile_store.get_profile(user_id, ENTITY_USER)
+            if not profile.name:
+                updates["name"] = nickname
         await self.profile_store.increment_interaction(
             user_id, ENTITY_USER, **updates
         )
@@ -469,6 +473,13 @@ class MemoryManager:
             # 3. 提取事实（LLM）— 群聊双路径，私聊单路径
             conversation_text = self._chunks_to_text(chunks)
 
+            # 构建 sender profile 上下文，辅助 LLM 更准确地提取和路由事实
+            profile_context = await self._build_sender_profiles_context(
+                adapter, unique_senders
+            )
+            if profile_context:
+                conversation_text = f"{profile_context}\n\n{conversation_text}"
+
             if is_group:
                 # 双路径并行提取
                 personal_facts, group_facts = await asyncio.gather(
@@ -603,6 +614,42 @@ class MemoryManager:
     # ==========================================
     # 工具方法
     # ==========================================
+
+    async def _build_sender_profiles_context(
+        self, adapter: str, unique_senders: set
+    ) -> str:
+        """为海马体提取构建 sender profile 摘要
+
+        让 LLM 在提取事实时知道每个 sender 的已知信息（昵称、曾用名、特征等），
+        避免重复提取已有事实，并辅助 entity 路由。
+        """
+        if not unique_senders:
+            return ""
+
+        parts = []
+        for sid in unique_senders:
+            entity_id = f"{adapter}:{sid}"
+            try:
+                profile = await self.profile_store.get_profile(entity_id, ENTITY_USER)
+                info = []
+                if profile.name:
+                    info.append(f"名字: {profile.name}")
+                if profile.nickname and profile.nickname != profile.name:
+                    info.append(f"当前昵称: {profile.nickname}")
+                if profile.aliases:
+                    info.append(f"曾用名: {', '.join(profile.aliases)}")
+                if profile.traits:
+                    info.append(f"特征: {', '.join(profile.traits)}")
+                if profile.facts:
+                    info.append(f"已知事实: {'; '.join(profile.facts[:5])}")
+                if info:
+                    parts.append(f"[{entity_id}] {' | '.join(info)}")
+            except Exception:
+                continue
+
+        if not parts:
+            return ""
+        return "## 参与者已知信息\n" + "\n".join(parts)
 
     @staticmethod
     def _chunks_to_text(chunks: list) -> str:

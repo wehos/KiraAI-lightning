@@ -391,6 +391,22 @@ class MessageProcessor:
         # 用户消息文本，用于 RAG recall 查询
         query_text = " ".join(m.message_str for m in event.messages if m.message_str)
 
+        # 更新所有发言者的 profile（写入 nickname，保证昵称索引可用）
+        seen_senders = set()
+        for msg in event.messages:
+            sender = msg.sender
+            sender_key = f"{event.adapter.name}:{sender.user_id}"
+            if sender_key not in seen_senders:
+                seen_senders.add(sender_key)
+                try:
+                    await self.memory_manager.update_user_interaction(
+                        sender_key,
+                        platform=event.adapter.platform or "",
+                        nickname=sender.nickname or "",
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to update sender profile {sender_key}: {e}")
+
         # Recall long-term memories (RAG)
         recalled_memories_str = ""
         try:
@@ -414,12 +430,23 @@ class MessageProcessor:
         except Exception as e:
             logger.error(f"Long-term memory recall failed: {e}", exc_info=True)
 
-        # Get user profile
+        # Get user profile（群聊：汇总所有发言者的 profile）
         user_profile_str = ""
         try:
-            user_profile_str = await self.memory_manager.get_profile_prompt(
-                user_key, "user"
-            )
+            if event.is_group_message() and len(seen_senders) > 1:
+                profile_parts = []
+                for sk in seen_senders:
+                    try:
+                        p = await self.memory_manager.get_profile_prompt(sk, "user")
+                        if p and p != "暂无画像信息":
+                            profile_parts.append(f"[{sk}]\n{p}")
+                    except Exception:
+                        pass
+                user_profile_str = "\n\n".join(profile_parts) if profile_parts else "暂无画像信息"
+            else:
+                user_profile_str = await self.memory_manager.get_profile_prompt(
+                    user_key, "user"
+                )
         except Exception as e:
             logger.error(f"User profile retrieval failed: {e}", exc_info=True)
 

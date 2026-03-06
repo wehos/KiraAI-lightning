@@ -48,6 +48,8 @@ class EntityProfile:
     relationships: dict = field(default_factory=dict)
     # 已知核心事实（高度浓缩的关键信息）
     facts: list = field(default_factory=list)
+    # 曾用名/历史昵称（用于昵称反查，自动维护）
+    aliases: list = field(default_factory=list)
 
     interaction_count: int = 0
     last_interaction: float = 0.0
@@ -73,6 +75,8 @@ class EntityProfile:
             parts.append(f"名字: {self.name}")
         if self.nickname and self.nickname != self.name:
             parts.append(f"昵称: {self.nickname}")
+        if self.aliases:
+            parts.append(f"曾用名: {', '.join(self.aliases)}")
         if self.platform:
             parts.append(f"平台: {self.platform}")
         if self.description:
@@ -205,10 +209,19 @@ class EntityProfileStore:
     async def increment_interaction(
         self, entity_id: str, entity_type: str = ENTITY_USER, **extra_updates
     ):
-        """递增交互计数并可选更新其他字段"""
+        """递增交互计数并可选更新其他字段
+
+        特别处理 nickname 变更：旧昵称自动归档到 aliases。
+        """
         profile = await self.get_profile(entity_id, entity_type)
         profile.interaction_count += 1
         profile.last_interaction = time.time()
+
+        # 昵称变更时，将旧昵称归档到 aliases
+        new_nickname = extra_updates.get("nickname", "")
+        if new_nickname and profile.nickname and new_nickname != profile.nickname:
+            if profile.nickname not in profile.aliases:
+                profile.aliases.append(profile.nickname)
 
         allowed = {f.name for f in fields(EntityProfile)} - {"entity_id", "entity_type"}
         for key, value in extra_updates.items():
@@ -220,9 +233,12 @@ class EntityProfileStore:
     async def resolve_entity_by_name(
         self, name_query: str, entity_type: str = ENTITY_USER
     ) -> Optional[str]:
-        """通过名字/昵称反查 entity_id
+        """通过昵称、QQ号或名字反查 entity_id
 
-        扫描所有指定类型的实体画像，模糊匹配 name 或 nickname。
+        扫描所有指定类型的实体画像，匹配优先级：
+        1. entity_id 尾部精确匹配（纯数字 QQ 号）
+        2. name/nickname 精确匹配
+        3. name/nickname 包含匹配
         返回最佳匹配的 entity_id，找不到则返回 None。
         """
         from .memory_paths import list_all_entities
@@ -230,26 +246,41 @@ class EntityProfileStore:
         if not name_query or not name_query.strip():
             return None
 
-        query_lower = name_query.strip().lower()
+        query = name_query.strip()
+        query_lower = query.lower()
+        is_numeric = query.isdigit()
         candidates = []
 
         for eid, etype in list_all_entities(entity_type):
+            # 优先级 1：entity_id 尾部匹配（adapter:qq_number 格式）
+            # 用户传入纯 QQ 号 "123456789"，匹配 "onebot:123456789"
+            if is_numeric and eid.endswith(f":{query}"):
+                return eid
+
             try:
                 profile = await self.get_profile(eid, etype)
             except Exception:
                 continue
 
-            # 精确匹配优先
+            # 优先级 2：name/nickname/aliases 精确匹配
             if profile.name and profile.name.lower() == query_lower:
                 return eid
             if profile.nickname and profile.nickname.lower() == query_lower:
                 return eid
+            for alias in profile.aliases:
+                if alias and alias.lower() == query_lower:
+                    return eid
 
-            # 包含匹配（兜底）
+            # 优先级 3：包含匹配（兜底）
             if profile.name and query_lower in profile.name.lower():
                 candidates.append((eid, len(profile.name)))
             elif profile.nickname and query_lower in profile.nickname.lower():
                 candidates.append((eid, len(profile.nickname)))
+            else:
+                for alias in profile.aliases:
+                    if alias and query_lower in alias.lower():
+                        candidates.append((eid, len(alias)))
+                        break
 
         # 返回名字最短的（最精确匹配）
         if candidates:

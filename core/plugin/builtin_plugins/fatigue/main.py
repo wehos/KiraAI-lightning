@@ -103,34 +103,41 @@ class DefaultPlugin(BasePlugin):
     def _circadian_fatigue(self) -> float:
         """日内节律疲劳 (0-40)
 
-        大幅强化：深夜凌晨直接给高疲劳基线，让 AI 在深夜真的很困。
+        曲线设计：以 15:00 为精力峰值(0)，4:00 为疲劳峰值(40)。
+        用余弦函数生成平滑的昼夜节律，再用分段修正关键时段。
         """
         if not self.enable_circadian:
             return 0.0
 
         hour = datetime.now().hour
         minute = datetime.now().minute
-        t = hour + minute / 60.0  # 精确到分钟的小数时间
+        t = hour + minute / 60.0
 
-        # 在低谷时段（2-6点）：疲劳 30-40，非常困
-        if self._hour_in_ranges(hour, self._low_ranges):
-            return 32.0 + 8.0 * math.sin(math.pi * (t - 2) / 4)  # 峰值40
+        # 基础曲线：以 15:00 为最清醒(0)，3:00 为最困(40)
+        # 把 t 映射到以 3:00 为中心的 [-12, 12] 区间
+        offset = t - 3.0
+        if offset < -12:
+            offset += 24
+        elif offset > 12:
+            offset -= 24
+        # offset=0(3am) → 最困(40), offset=±12(3pm) → 最清醒(0)
+        base = 20.0 * (1.0 + math.cos(math.pi * offset / 12.0))
+        # base: 40(3:00am) ~ 0(15:00pm)
 
-        # 在高峰时段：疲劳 5-8，清醒但不是零
+        # 高峰时段硬性压低：活跃期不超过 5
         if self._hour_in_ranges(hour, self._peak_ranges):
-            return 6.0
+            return min(base, 5.0)
 
-        # 深夜 22-2 点：疲劳 20-32，逐渐变困
-        if hour >= 22 or hour < 2:
-            if hour >= 22:
-                progress = (t - 22) / 4  # 22→26(2am) 映射到 0→1
-            else:
-                progress = (t + 2) / 4
-            return 20.0 + 12.0 * progress
+        # 低谷时段硬性抬高：深夜凌晨不低于 30
+        if self._hour_in_ranges(hour, self._low_ranges):
+            return max(base, 30.0)
 
-        # 其他过渡时段：余弦曲线
-        fatigue = 20.0 + 14.0 * math.cos(math.pi * (t - 4) / 12)
-        return max(0.0, min(40.0, fatigue))
+        # 上午过渡（6-10）：线性从困到清醒，不应该比 15 高
+        if 6 <= hour < 10:
+            progress = (t - 6.0) / 4.0  # 6:00→0, 10:00→1
+            return 18.0 * (1.0 - progress)  # 18→0
+
+        return max(0.0, min(40.0, base))
 
     def _session_fatigue_value(self, sid: str) -> float:
         """会话强度疲劳 (0-session_fatigue_cap)
