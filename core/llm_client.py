@@ -63,6 +63,28 @@ class LLMClient:
             response = await llm_model.chat(request)
             return response
 
+    async def chat_fast(self, messages: list) -> LLMResponse:
+        """使用快速/轻量模型（default_fast_llm）与 LLM 交互
+
+        适用于去重判断、合并等低复杂度任务，节省成本和延迟。
+        如果未配置 default_fast_llm，自动回退到 default_llm。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            LLMResponse
+        """
+        async with self.llm_semaphore:
+            request = LLMRequest(messages)
+            try:
+                llm_model = self.provider_mgr.get_default_fast_llm()
+            except (ValueError, TypeError):
+                # 未配置 fast_llm，回退到普通 llm
+                llm_model = self.provider_mgr.get_default_llm()
+            response = await llm_model.chat(request)
+            return response
+
     async def execute_tool(self, event: "KiraMessageBatchEvent", resp: LLMResponse):
         for tool_call in resp.tool_calls:
             tool_call_id = tool_call.get("id")

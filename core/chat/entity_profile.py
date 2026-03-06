@@ -217,6 +217,47 @@ class EntityProfileStore:
 
         await self.save_profile(profile)
 
+    async def resolve_entity_by_name(
+        self, name_query: str, entity_type: str = ENTITY_USER
+    ) -> Optional[str]:
+        """通过名字/昵称反查 entity_id
+
+        扫描所有指定类型的实体画像，模糊匹配 name 或 nickname。
+        返回最佳匹配的 entity_id，找不到则返回 None。
+        """
+        from .memory_paths import list_all_entities
+
+        if not name_query or not name_query.strip():
+            return None
+
+        query_lower = name_query.strip().lower()
+        candidates = []
+
+        for eid, etype in list_all_entities(entity_type):
+            try:
+                profile = await self.get_profile(eid, etype)
+            except Exception:
+                continue
+
+            # 精确匹配优先
+            if profile.name and profile.name.lower() == query_lower:
+                return eid
+            if profile.nickname and profile.nickname.lower() == query_lower:
+                return eid
+
+            # 包含匹配（兜底）
+            if profile.name and query_lower in profile.name.lower():
+                candidates.append((eid, len(profile.name)))
+            elif profile.nickname and query_lower in profile.nickname.lower():
+                candidates.append((eid, len(profile.nickname)))
+
+        # 返回名字最短的（最精确匹配）
+        if candidates:
+            candidates.sort(key=lambda x: x[1])
+            return candidates[0][0]
+
+        return None
+
     async def get_profile_prompt(
         self, entity_id: str, entity_type: str = ENTITY_USER
     ) -> str:

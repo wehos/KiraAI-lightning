@@ -44,6 +44,42 @@ def _resolve_entity_from_event(event) -> Tuple[str, str]:
         return "", "user"
 
 
+def _looks_like_entity_id(entity_id: str) -> bool:
+    """判断是否为合法 entity_id 格式（adapter:numeric_id）"""
+    if not entity_id:
+        return False
+    if ":" in entity_id:
+        parts = entity_id.split(":", 1)
+        # adapter:id 格式
+        return len(parts) == 2 and len(parts[1]) > 0
+    return False
+
+
+async def _resolve_entity_id_by_name(
+    entity_id: str, entity_type: str, event=None
+) -> Tuple[str, str]:
+    """如果 entity_id 看起来像昵称而非标准格式，尝试反查。
+
+    返回 (resolved_entity_id, entity_type)。
+    """
+    if not entity_id or _looks_like_entity_id(entity_id):
+        return entity_id, entity_type
+
+    # entity_id 不是标准格式，当作昵称尝试 resolve
+    if _memory_manager and hasattr(_memory_manager, "profile_store"):
+        resolved = await _memory_manager.profile_store.resolve_entity_by_name(
+            entity_id, entity_type
+        )
+        if resolved:
+            logger.info(
+                f"Nickname resolved: '{entity_id}' → {resolved} ({entity_type})"
+            )
+            return resolved, entity_type
+
+    logger.warning(f"Could not resolve nickname '{entity_id}', using as-is")
+    return entity_id, entity_type
+
+
 class MemoryAddTool(BaseTool):
     name = "memory_add"
     description = "添加一条记忆到长期记忆系统"
@@ -53,7 +89,7 @@ class MemoryAddTool(BaseTool):
             "text": {"type": "string", "description": "要记录的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -95,6 +131,11 @@ class MemoryAddTool(BaseTool):
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
+
         try:
             importance = max(1, min(10, int(importance)))
         except (TypeError, ValueError):
@@ -109,6 +150,31 @@ class MemoryAddTool(BaseTool):
         folder = folder_map.get(memory_type, "facts")
 
         try:
+            # 走去重管线（与海马体一致）：SHA-256 精确 → FTS5 + LLM 语义判断
+            if hasattr(_memory_manager, "extractor") and _memory_manager.extractor:
+                decision, matched = await _memory_manager.extractor.deduplicate(
+                    text, entity_id, entity_type, folder
+                )
+                if decision == "duplicate":
+                    logger.info(f"MemoryAddTool: duplicate skipped: {text[:50]}...")
+                    return f"Memory already exists (duplicate detected), skipped"
+                if decision == "update" and matched:
+                    # 合并后更新旧记忆
+                    merged_text = await _memory_manager.extractor.merge_facts(
+                        matched.text, text
+                    )
+                    matched.text = merged_text
+                    matched.importance = max(matched.importance, importance)
+                    await _memory_manager.tree_store.update_memory(matched)
+                    logger.info(
+                        f"MemoryAddTool: merged into existing: {matched.id}"
+                    )
+                    return (
+                        f"Memory merged into existing: id={matched.id}, "
+                        f"entity={entity_id}"
+                    )
+
+            # decision == "new" 或无 extractor 兜底：直接写入
             entry = await _memory_manager.tree_store.add_memory(
                 content_text=text,
                 memory_type=memory_type,
@@ -134,7 +200,7 @@ class MemoryUpdateTool(BaseTool):
             "text": {"type": "string", "description": "更新后的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -170,6 +236,11 @@ class MemoryUpdateTool(BaseTool):
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
+
         memory = await _memory_manager.tree_store.get_memory(
             memory_id=memory_id,
             entity_id=entity_id,
@@ -201,7 +272,7 @@ class MemoryRemoveTool(BaseTool):
             "memory_id": {"type": "string", "description": "记忆ID"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -231,6 +302,11 @@ class MemoryRemoveTool(BaseTool):
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
+
         if await _memory_manager.tree_store.archive_memory(
             memory_id=memory_id,
             entity_id=entity_id,
@@ -250,7 +326,7 @@ class MemorySearchTool(BaseTool):
             "query": {"type": "string", "description": "搜索查询文本"},
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -276,6 +352,11 @@ class MemorySearchTool(BaseTool):
         if not entity_id and self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
+
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
 
         try:
             k = max(1, int(k))
@@ -310,7 +391,7 @@ class ProfileViewTool(BaseTool):
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -330,6 +411,11 @@ class ProfileViewTool(BaseTool):
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
 
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
+
         return await _memory_manager.profile_store.get_profile_prompt(
             entity_id, entity_type
         )
@@ -343,7 +429,7 @@ class ProfileUpdateTool(BaseTool):
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "实体ID（可省略，系统自动推断为当前用户）",
+                "description": "实体ID或昵称（可省略，自动推断为当前用户。支持传入用户昵称，系统自动解析）",
             },
             "entity_type": {
                 "type": "string",
@@ -385,6 +471,11 @@ class ProfileUpdateTool(BaseTool):
         if not entity_id and self._event_context:
             entity_id, entity_type = _resolve_entity_from_event(self._event_context)
             logger.info(f"Auto-resolved entity: {entity_id} ({entity_type})")
+
+        # 昵称 → entity_id 反查
+        entity_id, entity_type = await _resolve_entity_id_by_name(
+            entity_id, entity_type, self._event_context
+        )
 
         store = _memory_manager.profile_store
 

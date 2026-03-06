@@ -139,6 +139,8 @@ class KiraLifecycle:
         self.persona_evolution = PersonaEvolutionEngine(
             self.memory_manager.tree_store, self.persona_manager
         )
+        # 注入到 memory_manager，启用 Phase 1 自我觉察采集
+        self.memory_manager.set_persona_evolution(self.persona_evolution)
 
         # ====== init prompt manager ======
         self.prompt_manager = PromptManager(

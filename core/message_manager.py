@@ -402,7 +402,7 @@ class MessageProcessor:
             if event.is_group_message():
                 group_key = f"{event.adapter.name}:{event.session.session_id}"
                 group_recalled = await self.memory_manager.recall(
-                    query_text, entity_id=group_key, entity_type="group", k=3
+                    query_text, entity_id=group_key, entity_type="group", k=5
                 )
                 # 去重后合并
                 existing_ids = {m.id for m in recalled}
@@ -443,7 +443,19 @@ class MessageProcessor:
         # messages.extend(session_memory)
 
         # New Logic Start
-        llm_model = self.provider_mgr.get_default_llm()
+        # 如果消息中包含图片，使用 VLM 直接说话；否则使用默认 LLM
+        all_has_images = any(
+            hasattr(m, "image_data") and m.image_data for m in event.messages
+        )
+        if all_has_images:
+            try:
+                llm_model = self.provider_mgr.get_default_vlm()
+                llm_logger.info("Switched to VLM for image conversation (VLM speaks directly)")
+            except (ValueError, TypeError):
+                llm_logger.warning("VLM not configured, falling back to default LLM for image")
+                llm_model = self.provider_mgr.get_default_llm()
+        else:
+            llm_model = self.provider_mgr.get_default_llm()
         if not llm_model:
             llm_logger.error(
                 f"Default LLM model not set, please set it in Configuration"

@@ -81,7 +81,15 @@ class MemoryManager:
         self._background_tasks: set = set()
         self._background_tasks_lock = Lock()
 
+        # === Phase 1: 自我觉察采集（由 lifecycle 注入 PersonaEvolutionEngine） ===
+        self._persona_evolution = None
+
         logger.info("MemoryManager initialized (dual-brain, JSON-based architecture)")
+
+    def set_persona_evolution(self, engine):
+        """注入 PersonaEvolutionEngine 实例，启用自我觉察采集"""
+        self._persona_evolution = engine
+        logger.info("PersonaEvolution engine connected to MemoryManager")
 
     async def async_init(self):
         """异步初始化：从 TOML 文件重建 SQLite 索引，确保一致性
@@ -97,6 +105,8 @@ class MemoryManager:
         """延迟设置 LLM 客户端"""
         self._llm_client = llm_client
         self.extractor.set_llm_client(llm_client)
+        # 同时将 llm_client 作为 fast_llm 的后端（通过 chat_fast 方法自动选模型）
+        self.extractor.set_fast_llm_client(llm_client)
 
     # ==========================================
     # 短期记忆（对话历史 — 滑动窗口）
@@ -525,8 +535,37 @@ class MemoryManager:
                 f"{total} facts ({len(personal_facts)} personal + {len(group_facts)} group), "
                 f"senders={unique_senders}"
             )
+
+            # 7. Phase 1: 自我觉察采集（只存不读）
+            await self._collect_self_awareness(conversation_text)
+
         except Exception as e:
             logger.error(f"Hippocampus processing error: {e}", exc_info=True)
+
+    async def _collect_self_awareness(self, conversation_text: str):
+        """Phase 1: 从对话中提取 AI 的自我觉察，写入 global/self/facts/
+
+        只存不读：写入的数据不会被召回到 LLM 上下文。
+        失败不影响主流程（静默捕获异常）。
+        """
+        if not self._persona_evolution:
+            return
+
+        try:
+            insights = await self.extractor.extract_self_awareness(conversation_text)
+            if not insights:
+                return
+
+            for insight in insights:
+                await self._persona_evolution.record_self_awareness(
+                    content=insight,
+                    importance=3,
+                    tags=["auto-extracted", "phase1"],
+                )
+                logger.info(f"[Phase1] Self-awareness recorded: {insight[:60]}...")
+        except Exception as e:
+            # 静默失败：不影响主流程
+            logger.warning(f"[Phase1] Self-awareness extraction failed: {e}")
 
     async def _update_profile_from_facts(
         self, entity_id: str, entity_type: str, facts: list[dict]

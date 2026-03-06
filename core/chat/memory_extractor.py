@@ -33,12 +33,22 @@ class MemoryExtractor:
         self.tree_store = tree_store
         self.index: MemoryIndex = tree_store.index
         self._llm_client = llm_client
+        self._fast_llm_client = None  # 轻量模型，用于去重/合并等低复杂度任务
 
         # 升维阈值：facts 积累达到此数量时触发反思
         self.reflection_threshold = 5
 
     def set_llm_client(self, llm_client):
         self._llm_client = llm_client
+
+    def set_fast_llm_client(self, fast_llm_client):
+        """设置轻量 LLM 客户端，用于去重/合并（回退到 _llm_client）"""
+        self._fast_llm_client = fast_llm_client
+
+    @property
+    def _fast_or_default(self):
+        """获取快速 LLM 客户端，未设置则回退到主 LLM"""
+        return self._fast_llm_client or self._llm_client
 
     # ==========================================
     # 事实提取（双路径）
@@ -172,6 +182,74 @@ class MemoryExtractor:
         return []
 
     # ==========================================
+    # 自我觉察提取（Phase 1: 只存不读）
+    # ==========================================
+
+    async def extract_self_awareness(
+        self, conversation_text: str, ai_response_text: str = ""
+    ) -> list[str]:
+        """从对话中提取 AI 关于自身行为的觉察
+
+        Phase 1 只存不读：觉察写入 global/self/facts/，不影响召回。
+        大部分对话不应产出觉察（返回空列表）。只有当 AI 在这次互动中
+        表现出明显的行为模式时才记录。
+
+        Args:
+            conversation_text: 本轮对话全文
+            ai_response_text: AI 在这轮对话中的回复文本（可选）
+
+        Returns:
+            觉察文本列表（通常 0-2 条，大部分情况为空）
+        """
+        if not self._llm_client:
+            return []
+
+        response_section = ""
+        if ai_response_text:
+            response_section = f"\n\n你的回复:\n{ai_response_text}"
+
+        prompt = f"""你刚刚参与了一段对话。请回顾这次互动，思考你自己在这次对话中的**行为表现**。
+
+对话内容:
+{conversation_text}{response_section}
+
+请思考：
+- 你的回复风格有什么特点？（比如偏啰嗦/偏简短、语气偏冷/偏热情）
+- 你处理这类话题/这类用户时有什么倾向？
+- 有没有什么做得不好的地方，或者做得特别好的地方？
+- 你注意到自己的什么习惯或模式？
+
+**输出要求**：
+- 只关注你自己的行为模式，不要总结对话内容
+- 每条觉察必须以"我"开头（例如："我在回答技术问题时倾向于给出过于详细的解释"）
+- 只输出有价值的觉察，不要为了输出而输出
+- 如果这次对话没有值得记录的行为觉察，直接输出 NONE
+- 如果有，每条一行，最多2条
+
+直接输出觉察内容或 NONE，不要有其他内容。"""
+
+        try:
+            resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+            if resp and resp.text_response:
+                text = resp.text_response.strip()
+                if text.upper() == "NONE" or not text:
+                    return []
+                insights = [
+                    line.strip()
+                    for line in text.split("\n")
+                    if line.strip() and line.strip().upper() != "NONE"
+                ]
+                # 过滤：必须以"我"开头，且长度合理
+                insights = [
+                    s for s in insights
+                    if s.startswith("我") and 5 < len(s) < 200
+                ]
+                return insights[:2]  # 最多 2 条
+        except Exception as e:
+            logger.error(f"Self-awareness extraction error: {e}")
+        return []
+
+    # ==========================================
     # 语义 ID 生成
     # ==========================================
 
@@ -230,31 +308,31 @@ class MemoryExtractor:
             logger.debug(f"Exact hash match: {new_content[:50]}...")
             return "duplicate", None
 
-        # === 第二级：FTS5 语义搜索 + LLM 判断 ===
+        # === 第二级：FTS5 语义搜索 + LLM 判断（多候选） ===
         existing = await self.tree_store.search(
             query=new_content,
             entity_id=entity_id,
             entity_type=entity_type,
             folder=folder,
-            k=1,
+            k=3,
             update_access=False,
         )
 
         if not existing:
             return "new", None
 
-        most_similar = existing[0]
-
-        # LLM 判断关系
-        decision = await self._check_conflict(new_content, most_similar.text)
-        if decision in ("duplicate", "update"):
-            return decision, most_similar
+        # 逐条检查，命中即返回（按相似度排序，最相似的先检查）
+        for candidate in existing:
+            decision = await self._check_conflict(new_content, candidate.text)
+            if decision in ("duplicate", "update"):
+                return decision, candidate
 
         return "new", None
 
     async def _check_conflict(self, new_content: str, existing_content: str) -> str:
-        """用 LLM 判断新旧记忆的关系"""
-        if not self._llm_client:
+        """用 LLM 判断新旧记忆的关系（使用快速模型）"""
+        client = self._fast_or_default
+        if not client:
             return "new"
 
         prompt = f"""比较以下两条信息，判断它们的关系：
@@ -270,7 +348,10 @@ class MemoryExtractor:
 只输出选项文本，不要有其他内容。"""
 
         try:
-            resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+            if hasattr(client, "chat_fast"):
+                resp = await client.chat_fast([{"role": "user", "content": prompt}])
+            else:
+                resp = await client.chat([{"role": "user", "content": prompt}])
             if resp and resp.text_response:
                 result = resp.text_response.strip().strip('"').lower()
                 if result in ("duplicate", "update", "new"):
@@ -284,8 +365,9 @@ class MemoryExtractor:
     # ==========================================
 
     async def merge_facts(self, existing_text: str, new_text: str) -> str:
-        """LLM 合并两条事实为一条"""
-        if not self._llm_client:
+        """LLM 合并两条事实为一条（使用快速模型）"""
+        client = self._fast_or_default
+        if not client:
             return f"{existing_text}；{new_text}"
 
         prompt = f"""将以下两条信息合并为一条，保留所有有用信息：
@@ -296,7 +378,10 @@ class MemoryExtractor:
 直接输出合并后的结果，不要有其他内容。"""
 
         try:
-            resp = await self._llm_client.chat([{"role": "user", "content": prompt}])
+            if hasattr(client, "chat_fast"):
+                resp = await client.chat_fast([{"role": "user", "content": prompt}])
+            else:
+                resp = await client.chat([{"role": "user", "content": prompt}])
             if resp and resp.text_response:
                 return resp.text_response.strip()
         except Exception as e:
