@@ -94,6 +94,22 @@ def _looks_like_entity_id(entity_id: str) -> bool:
     return False
 
 
+def _looks_like_group_id(entity_id: str) -> bool:
+    """检测 LLM 是否误传了群号作为 entity_id。
+
+    群号特征：纯数字、通常 6-10 位；或者包含 'group' 关键字。
+    与 QQ 个人号的区别难以仅从数字判断，所以只拦截明显的群号格式。
+    """
+    if not entity_id:
+        return False
+    eid = entity_id.strip()
+    # 如果 LLM 传了类似 "group:xxx" 或者包含 "群" 字的
+    lower = eid.lower()
+    if "group" in lower or "群" in eid:
+        return True
+    return False
+
+
 async def _resolve_entity_id_by_name(
     entity_id: str, entity_type: str, event=None
 ) -> Tuple[str, str]:
@@ -216,16 +232,49 @@ async def _resolve_single_entity_from_context(
     return "", "user"
 
 
+async def _smart_resolve_entity(
+    entity_id: str, entity_type: str, query: str, event=None
+) -> Tuple[str, str]:
+    """统一的 entity 解析入口，所有 memory tool 共用。
+
+    逻辑：
+    1. LLM 传了 entity_id 但看起来是群号 → 忽略，走自动提取
+    2. LLM 传了合法 entity_id → resolve 昵称/QQ号
+    3. LLM 没传 entity_id + 有 fast_llm → 自动从对话上下文提取
+    4. 以上都失败 → 回退到 event 当前发言者
+    """
+    # 拦截群号：LLM 误传群号时当作没传
+    if entity_id and _looks_like_group_id(entity_id):
+        logger.warning(f"Rejected group-like entity_id: '{entity_id}', falling back to auto-resolve")
+        entity_id = ""
+
+    if entity_id:
+        return await _resolve_entity_id_by_name(entity_id, entity_type, event)
+
+    if _llm_client:
+        return await _resolve_single_entity_from_context(query, "", event)
+
+    if event:
+        eid, etype = _resolve_entity_from_event(event)
+        logger.info(f"Auto-resolved entity (fallback): {eid}")
+        return eid, etype
+
+    return "", "user"
+
+
 class MemoryAddTool(BaseTool):
     name = "memory_add"
-    description = "添加一条记忆到长期记忆系统"
+    description = "添加一条记忆到长期记忆系统。记忆按用户存储，系统会自动识别当前对话涉及的用户。"
     parameters = {
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "要记录的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "没有明确目标时可以省略，系统会自动从对话上下文推断。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -262,18 +311,9 @@ class MemoryAddTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
 
-        # 智能 entity 解析：LLM 传了 entity_id 走 resolve，没传走 fast_llm 提取
-        if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-        elif _llm_client:
-            entity_id, entity_type = await _resolve_single_entity_from_context(
-                text, "", self._event_context
-            )
-        elif self._event_context:
-            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
-            logger.info(f"Auto-resolved entity (fallback): {entity_id}")
+        entity_id, entity_type = await _smart_resolve_entity(
+            entity_id, entity_type, text, self._event_context
+        )
 
         try:
             importance = max(1, min(10, int(importance)))
@@ -339,7 +379,10 @@ class MemoryUpdateTool(BaseTool):
             "text": {"type": "string", "description": "更新后的记忆文本"},
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "没有明确目标时可以省略，系统自动推断。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -370,16 +413,9 @@ class MemoryUpdateTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
 
-        if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-        elif _llm_client:
-            entity_id, entity_type = await _resolve_single_entity_from_context(
-                text, "", self._event_context
-            )
-        elif self._event_context:
-            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+        entity_id, entity_type = await _smart_resolve_entity(
+            entity_id, entity_type, text, self._event_context
+        )
 
         memory = await _memory_manager.tree_store.get_memory(
             memory_id=memory_id,
@@ -412,7 +448,10 @@ class MemoryRemoveTool(BaseTool):
             "memory_id": {"type": "string", "description": "记忆ID"},
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "没有明确目标时可以省略，系统自动推断。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -437,12 +476,9 @@ class MemoryRemoveTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "tree_store"):
             return "Memory system not available"
 
-        if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-        elif self._event_context:
-            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+        entity_id, entity_type = await _smart_resolve_entity(
+            entity_id, entity_type, memory_id, self._event_context
+        )
 
         if await _memory_manager.tree_store.archive_memory(
             memory_id=memory_id,
@@ -456,14 +492,22 @@ class MemoryRemoveTool(BaseTool):
 
 class MemorySearchTool(BaseTool):
     name = "memory_search"
-    description = "搜索长期记忆，通过语义相似度检索相关记忆。支持自动从对话上下文推断涉及的用户，支持多用户并行搜索。"
+    description = (
+        "搜索长期记忆。省略 entity_id 时系统会自动识别对话中涉及的用户，"
+        "并支持同时搜索多个用户的记忆（自动并行搜索+汇总）。"
+        "大多数情况下不需要传 entity_id，直接传 query 即可。"
+    )
     parameters = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "搜索查询文本"},
             "entity_id": {
                 "type": "string",
-                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从对话上下文推断涉及的用户（可能是多个）。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "可以用逗号分隔传入多个用户（如 '小明,小红'），系统会并行搜索所有用户的记忆并汇总。"
+                    "没有明确目标时可以省略，系统会自动识别对话中涉及的用户。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -510,15 +554,35 @@ class MemorySearchTool(BaseTool):
         except (TypeError, ValueError):
             k = 5
 
-        # === 路径 1：LLM 明确传了 entity_id → 单 entity 搜索 ===
+        # 拦截群号：LLM 误传群号时当作没传
+        if entity_id and _looks_like_group_id(entity_id):
+            logger.warning(f"MemorySearch: rejected group-like entity_id '{entity_id}'")
+            entity_id = ""
+
+        # === 路径 1：LLM 明确传了 entity_id ===
         if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-            memories = await _memory_manager.recall(
-                query, entity_id=entity_id, entity_type=entity_type, k=k
-            )
-            return self._format_memories(memories) or "No relevant memories found"
+            # 支持逗号分隔的多 entity 输入
+            names = [n.strip() for n in entity_id.split(",") if n.strip()]
+
+            if len(names) == 1:
+                # 单用户：直接搜索
+                eid, etype = await _resolve_entity_id_by_name(
+                    names[0], entity_type, self._event_context
+                )
+                memories = await _memory_manager.recall(
+                    query, entity_id=eid, entity_type=etype, k=k
+                )
+                return self._format_memories(memories) or "No relevant memories found"
+
+            # 多用户：resolve 后并行搜索
+            resolved = []
+            for name in names:
+                rid, rtype = await _resolve_entity_id_by_name(name, "user")
+                if rid and _looks_like_entity_id(rid):
+                    resolved.append((rid, rtype))
+            if resolved:
+                return await self._parallel_search(query, resolved, k)
+            # 全部 resolve 失败，回退到下面的自动提取
 
         # === 路径 2：没传 entity_id → fast_llm 从对话上下文自动提取 ===
         extracted = []
@@ -552,7 +616,12 @@ class MemorySearchTool(BaseTool):
             )
             return self._format_memories(memories) or "No relevant memories found"
 
-        # === 单 entity：直接搜索 ===
+        return await self._parallel_search(query, resolved, k)
+
+    async def _parallel_search(
+        self, query: str, resolved: list, k: int
+    ) -> str:
+        """对多个 resolved entity 并行搜索，单个时直接返回，多个时汇总。"""
         if len(resolved) == 1:
             eid, etype = resolved[0]
             memories = await _memory_manager.recall(
@@ -560,14 +629,13 @@ class MemorySearchTool(BaseTool):
             )
             return self._format_memories(memories) or "No relevant memories found"
 
-        # === 多 entity：并行搜索 ===
+        # 多 entity 并行搜索
         search_tasks = [
             _memory_manager.recall(query, entity_id=eid, entity_type=etype, k=k)
             for eid, etype in resolved
         ]
         all_results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
-        # 合并结果，标注来源
         merged_parts = []
         for i, result in enumerate(all_results):
             if isinstance(result, Exception):
@@ -582,8 +650,6 @@ class MemorySearchTool(BaseTool):
             return "No relevant memories found"
 
         merged_text = "\n".join(merged_parts)
-
-        # fast_llm 筛选汇总
         return await self._summarize_multi_entity(query, merged_text)
 
     async def _summarize_multi_entity(self, query: str, merged_text: str) -> str:
@@ -611,13 +677,16 @@ class MemorySearchTool(BaseTool):
 
 class ProfileViewTool(BaseTool):
     name = "profile_view"
-    description = "查看实体画像信息"
+    description = "查看用户画像信息。省略 entity_id 时自动识别当前对话涉及的用户。"
     parameters = {
         "type": "object",
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "想要查询的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "没有明确目标时可以省略，系统自动推断。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -634,16 +703,9 @@ class ProfileViewTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "profile_store"):
             return "Profile system not available"
 
-        if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-        elif _llm_client:
-            entity_id, entity_type = await _resolve_single_entity_from_context(
-                "查看用户画像", "", self._event_context
-            )
-        elif self._event_context:
-            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+        entity_id, entity_type = await _smart_resolve_entity(
+            entity_id, entity_type, "查看用户画像", self._event_context
+        )
 
         return await _memory_manager.profile_store.get_profile_prompt(
             entity_id, entity_type
@@ -652,13 +714,16 @@ class ProfileViewTool(BaseTool):
 
 class ProfileUpdateTool(BaseTool):
     name = "profile_update"
-    description = "更新实体画像的特征标签、事实或关系"
+    description = "更新用户画像的特征标签、事实或关系"
     parameters = {
         "type": "object",
         "properties": {
             "entity_id": {
                 "type": "string",
-                "description": "想要操作的用户：昵称或QQ号。省略则系统自动从对话上下文推断。",
+                "description": (
+                    "目标用户，支持传入昵称、曾用名或QQ号，系统会自动匹配。"
+                    "没有明确目标时可以省略，系统自动推断。"
+                ),
             },
             "entity_type": {
                 "type": "string",
@@ -696,16 +761,9 @@ class ProfileUpdateTool(BaseTool):
         if not _memory_manager or not hasattr(_memory_manager, "profile_store"):
             return "Profile system not available"
 
-        if entity_id:
-            entity_id, entity_type = await _resolve_entity_id_by_name(
-                entity_id, entity_type, self._event_context
-            )
-        elif _llm_client:
-            entity_id, entity_type = await _resolve_single_entity_from_context(
-                value, "", self._event_context
-            )
-        elif self._event_context:
-            entity_id, entity_type = _resolve_entity_from_event(self._event_context)
+        entity_id, entity_type = await _smart_resolve_entity(
+            entity_id, entity_type, value, self._event_context
+        )
 
         store = _memory_manager.profile_store
 
